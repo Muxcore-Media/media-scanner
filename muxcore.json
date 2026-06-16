@@ -1,0 +1,10 @@
+{
+  "name": "Media Scanner",
+  "description": "Scans download directories, identifies media files via filename parsing, and imports them into an organized library structure",
+  "version": "0.1.0",
+  "author": "MuxCore",
+  "roles": ["scanner"],
+  "capabilities": ["media.scanner"],
+  "contracts": [],
+  "minCoreVersion": "0.4.0"
+}

@@ -1,0 +1,89 @@
+syntax = "proto3";
+package muxcore.scanner.v1;
+option go_package = "github.com/Muxcore-Media/media-scanner/proto/scannerv1;scannerv1";
+
+service ScannerService {
+  rpc Scan(ScanRequest) returns (ScanResponse);
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  rpc AddWatchDir(AddWatchDirRequest) returns (AddWatchDirResponse);
+  rpc RemoveWatchDir(RemoveWatchDirRequest) returns (RemoveWatchDirResponse);
+  rpc ListWatchDirs(ListWatchDirsRequest) returns (ListWatchDirsResponse);
+  rpc ListImported(ListImportedRequest) returns (ListImportedResponse);
+}
+
+message ScanRequest {}
+
+message ScanResponse {
+  int32 files_found = 1;
+  int32 files_imported = 2;
+  int32 files_skipped = 3;
+}
+
+message GetStatsRequest {}
+
+message GetStatsResponse {
+  int32 total_imported = 1;
+  int32 watch_dirs = 2;
+  int64 last_scan_at = 3;
+  string last_scan_status = 4;
+}
+
+message AddWatchDirRequest {
+  string path = 1;
+  string media_type = 2;  // "movie", "tv", "both"
+  string library_path = 3; // where to move organized files
+}
+
+message AddWatchDirResponse {
+  string id = 1;
+}
+
+message RemoveWatchDirRequest {
+  string id = 1;
+}
+
+message RemoveWatchDirResponse {}
+
+message ListWatchDirsRequest {}
+
+message ListWatchDirsResponse {
+  repeated WatchDir dirs = 1;
+}
+
+message WatchDir {
+  string id = 1;
+  string path = 2;
+  string media_type = 3;
+  string library_path = 4;
+  bool enabled = 5;
+  string created_at = 6;
+}
+
+message ListImportedRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+  string media_type = 3;
+}
+
+message ListImportedResponse {
+  repeated ImportedFile files = 1;
+  int32 total = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message ImportedFile {
+  string id = 1;
+  string original_path = 2;
+  string destination_path = 3;
+  string file_name = 4;
+  string media_type = 5;
+  string title = 6;
+  int32 year = 7;
+  int32 season_number = 8;
+  int32 episode_number = 9;
+  string quality = 10;
+  int32 tmdb_id = 11;
+  string imported_at = 12;
+  string status = 13;
+}

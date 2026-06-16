@@ -1,0 +1,37 @@
+services:
+  core:
+    image: ghcr.io/muxcore-media/core:latest
+    ports:
+      - "9090:9090"
+    environment:
+      MUXCORE_INSECURE_DISABLE_TLS: "true"
+      MUXCORE_LOG_LEVEL: debug
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:9090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  media-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "9470"
+    environment:
+      MUXCORE_GRPC_ADDR: core:9090
+      MUXCORE_GRPC_INSECURE: "true"
+      MUXCORE_LOG_LEVEL: debug
+      MUXCORE_MODULE_ID: media-scanner
+      SCANNER_LIBRARY_ROOT: /data/media
+    volumes:
+      - /path/to/downloads:/downloads:ro
+      - /path/to/media:/data/media
+      - scanner-data:/var/lib/media-scanner
+    depends_on:
+      core:
+        condition: service_healthy
+
+volumes:
+  scanner-data:
