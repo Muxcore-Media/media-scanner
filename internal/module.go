@@ -31,19 +31,21 @@ type Module struct {
 	db *sql.DB
 	mc *client.Client
 
-	id          string
-	dbPath      string
-	grpcAddr    string
-	libraryRoot string
-	grpcSrv     *grpc.Server
-	grpcLis     net.Listener
+	id              string
+	dbPath          string
+	grpcAddr        string
+	libraryRoot     string
+	defaultWatchDir string
+	grpcSrv         *grpc.Server
+	grpcLis         net.Listener
 }
 
 type Config struct {
-	ID          string
-	DBPath      string
-	GRPCAddr    string
-	LibraryRoot string
+	ID              string
+	DBPath          string
+	GRPCAddr        string
+	LibraryRoot     string
+	DefaultWatchDir string
 }
 
 func NewModule(cfg Config) *Module {
@@ -68,11 +70,15 @@ func NewModule(cfg Config) *Module {
 	if v := os.Getenv("SCANNER_LIBRARY_ROOT"); v != "" {
 		cfg.LibraryRoot = v
 	}
+	if v := os.Getenv("SCANNER_DEFAULT_WATCH_DIR"); v != "" {
+		cfg.DefaultWatchDir = v
+	}
 	return &Module{
-		id:          cfg.ID,
-		dbPath:      cfg.DBPath,
-		grpcAddr:    cfg.GRPCAddr,
-		libraryRoot: cfg.LibraryRoot,
+		id:              cfg.ID,
+		dbPath:          cfg.DBPath,
+		grpcAddr:        cfg.GRPCAddr,
+		libraryRoot:     cfg.LibraryRoot,
+		defaultWatchDir: cfg.DefaultWatchDir,
 	}
 }
 
@@ -163,6 +169,15 @@ func (m *Module) Init(ctx context.Context) error {
 	m.mu.Lock()
 	m.db = db
 	m.mu.Unlock()
+
+	// Auto-register default watch directory if configured.
+	if m.defaultWatchDir != "" {
+		watchID := fmt.Sprintf("auto_watch_%d", time.Now().UnixNano())
+		m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
+			watchID, m.defaultWatchDir, "both", "", time.Now().UTC().Format(time.RFC3339),
+		)
+		slog.Info("auto-registered watch dir", "path", m.defaultWatchDir)
+	}
 
 	lis, err := net.Listen("tcp", m.grpcAddr)
 	if err != nil {
@@ -401,37 +416,59 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		return false
 	}
 
+	// Build the logical storage key and local destination path.
+	storageKey := m.buildStorageKey(parsed)
+	if storageKey == "" {
+		slog.Debug("unable to build storage key", "file", fileName)
+		return false
+	}
 	destPath := m.buildDestPath(parsed, libPath)
-	if destPath == "" {
-		slog.Debug("unable to build destination path", "file", fileName)
-		return false
+
+	// Store file via core storage gRPC API. Only core's storage provider
+	// has direct filesystem access to the media library volume.
+	if m.mc != nil {
+		f, err := os.Open(fullPath)
+		if err != nil {
+			slog.Error("open source file for storage put", "src", fullPath, "error", err)
+			return false
+		}
+		if err := m.mc.Storage.Put(context.Background(), storageKey, f); err != nil {
+			f.Close()
+			slog.Error("storage put failed", "key", storageKey, "error", err)
+			return false
+		}
+		f.Close()
+	} else {
+		// Fallback: direct filesystem move (no core connection).
+		destDir := filepath.Dir(destPath)
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			slog.Error("create destination directory", "path", destDir, "error", err)
+			return false
+		}
+		if err := os.Rename(fullPath, destPath); err != nil {
+			slog.Error("move file", "src", fullPath, "dst", destPath, "error", err)
+			return false
+		}
 	}
 
-	destDir := filepath.Dir(destPath)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		slog.Error("create destination directory", "path", destDir, "error", err)
-		return false
-	}
-
-	if err := os.Rename(fullPath, destPath); err != nil {
-		slog.Error("move file", "src", fullPath, "dst", destPath, "error", err)
-		return false
-	}
+	// Remove source file after successful storage.
+	os.Remove(fullPath)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
 
 	m.mu.Lock()
 	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
-		importID, fullPath, destPath, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, parsed.Quality, parsed.TMDBID, now,
+		importID, fullPath, storageKey, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, parsed.Quality, parsed.TMDBID, now,
 	)
 	m.mu.Unlock()
 
-	slog.Info("imported file", "src", fileName, "dst", destPath, "type", parsed.MediaType, "title", parsed.Title)
+	slog.Info("imported file", "src", fileName, "key", storageKey, "type", parsed.MediaType, "title", parsed.Title)
 
 	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
 		"original_path":    fullPath,
-		"destination_path": destPath,
+		"destination_path": storageKey,
+		"storage_key":      storageKey,
 		"media_type":       parsed.MediaType,
 		"title":            parsed.Title,
 		"year":             parsed.Year,
@@ -441,6 +478,32 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 	})
 
 	return true
+}
+
+func (m *Module) buildStorageKey(p parsedFile) string {
+	safeTitle := sanitizeName(p.Title)
+	ext := filepath.Ext(p.FileName)
+	switch p.MediaType {
+	case "movie":
+		yearStr := ""
+		if p.Year > 0 {
+			yearStr = fmt.Sprintf(" (%d)", p.Year)
+		}
+		base := fmt.Sprintf("%s.%d%s", safeTitle, p.Year, ext)
+		if p.Quality != "" {
+			base = fmt.Sprintf("%s.%d.%s%s", safeTitle, p.Year, p.Quality, ext)
+		}
+		return filepath.Join("media", "Movies", safeTitle+yearStr, base)
+	case "tv":
+		seasonDir := fmt.Sprintf("Season %02d", p.Season)
+		epBase := fmt.Sprintf("%s.S%02dE%02d", safeTitle, p.Season, p.Episode)
+		if p.Quality != "" {
+			epBase = fmt.Sprintf("%s.S%02dE%02d.%s", safeTitle, p.Season, p.Episode, p.Quality)
+		}
+		return filepath.Join("media", "TV", safeTitle, seasonDir, epBase+ext)
+	default:
+		return filepath.Join("media", "Other", safeTitle, p.FileName)
+	}
 }
 
 func (m *Module) buildDestPath(p parsedFile, libPath string) string {
@@ -638,12 +701,18 @@ func (m *Module) GetStats(ctx context.Context, req *scannerv1.GetStatsRequest) (
 
 	var lastScanAt int64
 	var lastStatus string
-	db.QueryRow(`SELECT started_at, status FROM scan_log ORDER BY started_at DESC LIMIT 1`).Scan(&lastStatus, &lastScanAt)
+	var startedAt string
+	if err := db.QueryRow(`SELECT status, started_at FROM scan_log ORDER BY started_at DESC LIMIT 1`).Scan(&lastStatus, &startedAt); err == nil {
+		if t, parseErr := time.Parse(time.RFC3339, startedAt); parseErr == nil {
+			lastScanAt = t.Unix()
+		}
+	}
 
 	return &scannerv1.GetStatsResponse{
 		TotalImported:  int32(totalImported),
 		WatchDirs:      int32(watchDirs),
 		LastScanStatus: lastStatus,
+		LastScanAt:     lastScanAt,
 	}, nil
 }
 
