@@ -28,6 +28,7 @@ Download dir ──→ media-scanner ──→ Organized library
 - **Deduplication** — already-imported files are tracked in SQLite and skipped
 - **Watch directory management** — add/remove watched paths at runtime via gRPC
 - **Import history** — full audit trail of all imported files
+- **Targeted import** — `ImportPath` imports files under a single path (must be inside a watch dir). Register the downloader `DOWNLOAD_DIR` as a watch directory so automation can import completed downloads.
 
 ---
 

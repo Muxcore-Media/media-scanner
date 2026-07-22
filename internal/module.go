@@ -1353,6 +1353,52 @@ func (m *Module) Scan(ctx context.Context, req *scannerv1.ScanRequest) (*scanner
 	}, nil
 }
 
+func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathRequest) (*scannerv1.ImportPathResponse, error) {
+	path := strings.TrimSpace(req.GetPath())
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+	path = filepath.Clean(path)
+
+	dirs := m.collectWatchDirs()
+	if dirs == nil {
+		return nil, fmt.Errorf("not initialized")
+	}
+
+	d, ok := deepestWatchDir(dirs, path)
+	if !ok {
+		return nil, fmt.Errorf("path %q is not under any registered watch directory", path)
+	}
+
+	scanPath := path
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		scanPath = filepath.Dir(path)
+	}
+
+	found, imported, skipped := m.scanDirectory(scanPath, d.mediaType, d.libPath)
+	return &scannerv1.ImportPathResponse{
+		FilesFound:    int32(found),
+		FilesImported: int32(imported),
+		FilesSkipped:  int32(skipped),
+	}, nil
+}
+
+func deepestWatchDir(dirs []watchDirEntry, path string) (watchDirEntry, bool) {
+	clean := filepath.Clean(path)
+	var best watchDirEntry
+	bestLen := -1
+	for _, d := range dirs {
+		root := filepath.Clean(d.path)
+		if clean == root || strings.HasPrefix(clean, root+string(os.PathSeparator)) {
+			if len(root) > bestLen {
+				best = d
+				bestLen = len(root)
+			}
+		}
+	}
+	return best, bestLen >= 0
+}
+
 func (m *Module) ScanLibraryRoots(ctx context.Context, req *scannerv1.ScanLibraryRootsRequest) (*scannerv1.ScanLibraryRootsResponse, error) {
 	roots := m.collectLibraryRoots()
 	if roots == nil {
