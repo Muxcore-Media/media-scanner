@@ -21,7 +21,8 @@ Download dir ──→ media-scanner ──→ Organized library
 
 ### Key Features
 
-- **Automatic scanning** — watches configured directories every 60 seconds
+- **Automatic scanning** — fsnotify watches download directories (plus a 15m safety rescan)
+- **Archive extract** — ZIP/RAR archives are unpacked before import
 - **Filename parsing** — extracts title, year, season, episode, and quality from release names
 - **Smart organization** — Movies go to `Movies/Title (Year)/`, TV goes to `TV/Title/Season XX/`
 - **Deduplication** — already-imported files are tracked in SQLite and skipped
@@ -39,6 +40,7 @@ Download dir ──→ media-scanner ──→ Organized library
 | `SCANNER_DB_PATH` | `/var/lib/media-scanner/scanner.db` | SQLite database path |
 | `SCANNER_GRPC_ADDR` | `:9470` | gRPC listen address |
 | `SCANNER_LIBRARY_ROOT` | `/data/media` | Root directory for organized media |
+| `SCANNER_SAFETY_RESCAN` | `15m` | Fallback full rescan interval (`0` disables) |
 | `MUXCORE_GRPC_ADDR` | `localhost:9090` | Core mesh gRPC address |
 | `MUXCORE_GRPC_INSECURE` | `false` | Disable TLS for dev |
 

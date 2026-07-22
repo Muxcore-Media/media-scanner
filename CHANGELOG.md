@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Replace 60s poll with fsnotify watching and a configurable safety rescan (`SCANNER_SAFETY_RESCAN`, default 15m)
+- Extract ZIP/RAR archives into the watch tree before import (zip-slip safe; password archives skipped)
+
 ## v0.1.0 (2026-06-14)
 
 - Initial release
