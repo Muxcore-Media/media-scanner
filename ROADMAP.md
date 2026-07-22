@@ -2,4 +2,4 @@
 
 ## Remaining
 
-- [ ] Multiple naming convention templates
+- [x] Multiple naming convention templates

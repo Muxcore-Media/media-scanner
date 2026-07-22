@@ -619,7 +619,8 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 func (m *Module) resolveImportPaths(parsed parsedFile, libPath, fullPath string) (storageKey, destPath string) {
 	storageKey = m.buildStorageKey(parsed)
 	destPath = m.buildDestPath(parsed, libPath)
-	if preview := m.previewRename(fullPath, parsed); preview != nil && preview.GetNewPath() != "" {
+	tplID := m.namingTemplateForLibPath(libPath)
+	if preview := m.previewRename(fullPath, parsed, tplID); preview != nil && preview.GetNewPath() != "" {
 		folder := "Other"
 		switch parsed.MediaType {
 		case "movie":
@@ -654,7 +655,7 @@ func (m *Module) findCapabilityAddr(ctx context.Context, capability string) (str
 	return "", fmt.Errorf("no %s module found", capability)
 }
 
-func (m *Module) previewRename(fullPath string, parsed parsedFile) *renamev1.PreviewResponse {
+func (m *Module) previewRename(fullPath string, parsed parsedFile, templateID string) *renamev1.PreviewResponse {
 	ctx := context.Background()
 	addr, err := m.findCapabilityAddr(ctx, "media.renamer")
 	if err != nil {
@@ -683,6 +684,7 @@ func (m *Module) previewRename(fullPath string, parsed parsedFile) *renamev1.Pre
 		ReleaseGroup:   group,
 		AirDate:        parsed.AirDate,
 		Proper:         parseProperToken(parsed.FileName),
+		TemplateId:     templateID,
 	}
 	if parsed.TMDBID > 0 {
 		req.TmdbId = strconv.Itoa(parsed.TMDBID)
@@ -1383,6 +1385,8 @@ func (m *Module) ScanLibraryRoots(ctx context.Context, req *scannerv1.ScanLibrar
 }
 
 func (m *Module) collectLibraryRoots() []string {
+	registered, hasRegistered := m.listRegisteredRoots(context.Background())
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.db == nil {
@@ -1400,6 +1404,11 @@ func (m *Module) collectLibraryRoots() []string {
 		}
 		seen[p] = struct{}{}
 		roots = append(roots, p)
+	}
+	if hasRegistered {
+		for _, r := range registered {
+			add(r.GetPath())
+		}
 	}
 	if m.libraryRoot != "" {
 		add(m.libraryRoot)
