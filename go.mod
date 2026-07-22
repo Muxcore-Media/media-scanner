@@ -19,6 +19,7 @@ require (
 )
 
 require (
+	github.com/Muxcore-Media/media-root-folders v0.1.0
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -48,3 +49,5 @@ replace github.com/Muxcore-Media/media-ffprobe => ../media-ffprobe
 replace github.com/Muxcore-Media/media-subtitles => ../media-subtitles
 
 replace github.com/Muxcore-Media/media-tvshows => ../media-tvshows
+
+replace github.com/Muxcore-Media/media-root-folders => ../media-root-folders
