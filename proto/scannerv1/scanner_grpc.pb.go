@@ -26,6 +26,7 @@ const (
 	ScannerService_RemoveWatchDir_FullMethodName   = "/muxcore.scanner.v1.ScannerService/RemoveWatchDir"
 	ScannerService_ListWatchDirs_FullMethodName    = "/muxcore.scanner.v1.ScannerService/ListWatchDirs"
 	ScannerService_ListImported_FullMethodName     = "/muxcore.scanner.v1.ScannerService/ListImported"
+	ScannerService_ImportPath_FullMethodName       = "/muxcore.scanner.v1.ScannerService/ImportPath"
 )
 
 // ScannerServiceClient is the client API for ScannerService service.
@@ -39,6 +40,7 @@ type ScannerServiceClient interface {
 	RemoveWatchDir(ctx context.Context, in *RemoveWatchDirRequest, opts ...grpc.CallOption) (*RemoveWatchDirResponse, error)
 	ListWatchDirs(ctx context.Context, in *ListWatchDirsRequest, opts ...grpc.CallOption) (*ListWatchDirsResponse, error)
 	ListImported(ctx context.Context, in *ListImportedRequest, opts ...grpc.CallOption) (*ListImportedResponse, error)
+	ImportPath(ctx context.Context, in *ImportPathRequest, opts ...grpc.CallOption) (*ImportPathResponse, error)
 }
 
 type scannerServiceClient struct {
@@ -112,6 +114,15 @@ func (c *scannerServiceClient) ListImported(ctx context.Context, in *ListImporte
 	return out, nil
 }
 
+func (c *scannerServiceClient) ImportPath(ctx context.Context, in *ImportPathRequest, opts ...grpc.CallOption) (*ImportPathResponse, error) {
+	out := new(ImportPathResponse)
+	err := c.cc.Invoke(ctx, ScannerService_ImportPath_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ScannerServiceServer is the server API for ScannerService service.
 // All implementations must embed UnimplementedScannerServiceServer
 // for forward compatibility
@@ -123,6 +134,7 @@ type ScannerServiceServer interface {
 	RemoveWatchDir(context.Context, *RemoveWatchDirRequest) (*RemoveWatchDirResponse, error)
 	ListWatchDirs(context.Context, *ListWatchDirsRequest) (*ListWatchDirsResponse, error)
 	ListImported(context.Context, *ListImportedRequest) (*ListImportedResponse, error)
+	ImportPath(context.Context, *ImportPathRequest) (*ImportPathResponse, error)
 	mustEmbedUnimplementedScannerServiceServer()
 }
 
@@ -150,6 +162,9 @@ func (UnimplementedScannerServiceServer) ListWatchDirs(context.Context, *ListWat
 }
 func (UnimplementedScannerServiceServer) ListImported(context.Context, *ListImportedRequest) (*ListImportedResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListImported not implemented")
+}
+func (UnimplementedScannerServiceServer) ImportPath(context.Context, *ImportPathRequest) (*ImportPathResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ImportPath not implemented")
 }
 func (UnimplementedScannerServiceServer) mustEmbedUnimplementedScannerServiceServer() {}
 
@@ -290,6 +305,24 @@ func _ScannerService_ListImported_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ScannerService_ImportPath_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImportPathRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ScannerServiceServer).ImportPath(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ScannerService_ImportPath_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ScannerServiceServer).ImportPath(ctx, req.(*ImportPathRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ScannerService_ServiceDesc is the grpc.ServiceDesc for ScannerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -324,6 +357,10 @@ var ScannerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListImported",
 			Handler:    _ScannerService_ListImported_Handler,
+		},
+		{
+			MethodName: "ImportPath",
+			Handler:    _ScannerService_ImportPath_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
