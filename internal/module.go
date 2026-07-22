@@ -23,9 +23,11 @@ import (
 	renamev1 "github.com/Muxcore-Media/media-rename/proto/renamev1"
 	scannerv1 "github.com/Muxcore-Media/media-scanner/proto/scannerv1"
 	subtv1 "github.com/Muxcore-Media/media-subtitles/proto/subtv1"
+	tvmgmtv1 "github.com/Muxcore-Media/media-tvshows/proto/tvmgmtv1"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	"github.com/Muxcore-Media/core/sdk/go/client"
+	"github.com/fsnotify/fsnotify"
 	_ "modernc.org/sqlite"
 )
 
@@ -46,17 +48,30 @@ type Module struct {
 	minVideoBytes   int64
 	grpcSrv         *grpc.Server
 	grpcLis         net.Listener
+
+	watcher       *fsnotify.Watcher
+	watched       map[string]struct{}
+	watchCancel   context.CancelFunc
+	debounceMu    sync.Mutex
+	debounceTimer *time.Timer
+	debounceWait  time.Duration
+	safetyRescan  time.Duration
+	initialDelay  time.Duration
+	scanMu        sync.Mutex
 }
 
 type Config struct {
-	ID              string
-	DBPath          string
-	GRPCAddr        string
-	LibraryRoot     string
-	DefaultWatchDir string
-	ImportMode      string
-	SampleMaxBytes  int64
-	MinVideoBytes   int64
+	ID               string
+	DBPath           string
+	GRPCAddr         string
+	LibraryRoot      string
+	DefaultWatchDir  string
+	ImportMode       string
+	SampleMaxBytes   int64
+	MinVideoBytes    int64
+	DebounceWait     time.Duration
+	SafetyRescan     time.Duration
+	InitialScanDelay time.Duration
 }
 
 func NewModule(cfg Config) *Module {
@@ -110,6 +125,29 @@ func NewModule(cfg Config) *Module {
 			}
 		}
 	}
+	debounceWait := cfg.DebounceWait
+	if debounceWait <= 0 {
+		debounceWait = 400 * time.Millisecond
+	}
+	initialDelay := 5 * time.Second
+	if cfg.InitialScanDelay < 0 {
+		initialDelay = 0
+	} else if cfg.InitialScanDelay > 0 {
+		initialDelay = cfg.InitialScanDelay
+	}
+	safetyRescan := 15 * time.Minute
+	if cfg.SafetyRescan < 0 {
+		safetyRescan = 0
+	} else if cfg.SafetyRescan > 0 {
+		safetyRescan = cfg.SafetyRescan
+	}
+	if v := os.Getenv("SCANNER_SAFETY_RESCAN"); v != "" {
+		if v == "0" {
+			safetyRescan = 0
+		} else if d, err := time.ParseDuration(v); err == nil {
+			safetyRescan = d
+		}
+	}
 	return &Module{
 		id:              cfg.ID,
 		dbPath:          cfg.DBPath,
@@ -119,6 +157,9 @@ func NewModule(cfg Config) *Module {
 		importMode:      normalizeImportMode(cfg.ImportMode),
 		sampleMaxBytes:  cfg.SampleMaxBytes,
 		minVideoBytes:   minVideo,
+		debounceWait:    debounceWait,
+		safetyRescan:    safetyRescan,
+		initialDelay:    initialDelay,
 	}
 }
 
@@ -245,11 +286,17 @@ func (m *Module) Start(ctx context.Context) error {
 	}()
 
 	go m.dialCore(context.Background())
-	go m.scanLoop()
+	if err := m.startWatcher(); err != nil {
+		slog.Error("media-scanner: fsnotify watcher failed", "error", err)
+	}
+	watchCtx, cancel := context.WithCancel(context.Background())
+	m.watchCancel = cancel
+	go m.watchLoop(watchCtx)
 	return nil
 }
 
 func (m *Module) Stop(ctx context.Context) error {
+	m.stopWatcher()
 	if m.grpcSrv != nil {
 		m.grpcSrv.GracefulStop()
 	}
@@ -307,20 +354,13 @@ func (m *Module) publish(ctx context.Context, eventType string, payload map[stri
 
 // ── Scan Loop ─────────────────────────────────────────────────
 
-func (m *Module) scanLoop() {
-	const interval = 60 * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	time.Sleep(5 * time.Second)
-	m.runScan()
-
-	for range ticker.C {
-		m.runScan()
-	}
-}
-
 func (m *Module) runScan() {
+	if !m.scanMu.TryLock() {
+		m.scheduleScan()
+		return
+	}
+	defer m.scanMu.Unlock()
+
 	m.mu.RLock()
 	db := m.db
 	m.mu.RUnlock()
@@ -404,11 +444,30 @@ func (m *Module) scanDirectory(watchPath, mediaType, libPath string) (found, imp
 		}
 
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		fullPath := filepath.Join(watchPath, entry.Name())
+
+		if kind, isFirst := archiveKind(entry.Name()); kind != "" {
+			if !isFirst {
+				continue
+			}
+			dest, err := m.maybeExtractArchive(fullPath)
+			if err != nil {
+				slog.Warn("archive extract failed", "path", fullPath, "error", err)
+				continue
+			}
+			if dest != "" {
+				subFound, subImported, subSkipped := m.scanDirectory(dest, mediaType, libPath)
+				found += subFound
+				imported += subImported
+				skipped += subSkipped
+			}
+			continue
+		}
+
 		if !isMediaExt(ext) {
 			continue
 		}
 
-		fullPath := filepath.Join(watchPath, entry.Name())
 		found++
 
 		if m.isAlreadyImported(fullPath) {
@@ -622,9 +681,27 @@ func (m *Module) previewRename(fullPath string, parsed parsedFile) *renamev1.Pre
 		Extension:      filepath.Ext(parsed.FileName),
 		Edition:        edition,
 		ReleaseGroup:   group,
+		AirDate:        parsed.AirDate,
+		Proper:         parseProperToken(parsed.FileName),
 	}
 	if parsed.TMDBID > 0 {
 		req.TmdbId = strconv.Itoa(parsed.TMDBID)
+	}
+	if parsed.MediaType == "tv" {
+		if ep := m.lookupEpisodeRenameMeta(ctx, parsed); ep != nil && ep.GetFound() {
+			if ep.GetEpisodeTitle() != "" {
+				req.EpisodeTitle = ep.GetEpisodeTitle()
+			}
+			if ep.GetAirDate() != "" {
+				req.AirDate = ep.GetAirDate()
+			}
+			if ep.GetSeriesName() != "" {
+				req.Title = ep.GetSeriesName()
+			}
+			if ep.GetOriginalName() != "" {
+				req.OriginalTitle = ep.GetOriginalName()
+			}
+		}
 	}
 	if meta := m.probeRenameMeta(fullPath); meta != nil {
 		if meta.Resolution != "" {
@@ -703,6 +780,34 @@ func (m *Module) probeRenameMeta(path string) *renameProbeMeta {
 		}
 	}
 	return meta
+}
+
+func (m *Module) lookupEpisodeRenameMeta(ctx context.Context, parsed parsedFile) *tvmgmtv1.LookupEpisodeResponse {
+	addr, err := m.findCapabilityAddr(ctx, "media.library.tv")
+	if err != nil {
+		return nil
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	cli := tvmgmtv1.NewTvManagementServiceClient(conn)
+	resp, err := cli.LookupEpisode(ctx, &tvmgmtv1.LookupEpisodeRequest{
+		TmdbId:         int32(parsed.TMDBID),
+		Title:          parsed.Title,
+		Year:           int32(parsed.Year),
+		SeasonNumber:   int32(parsed.Season),
+		EpisodeNumber:  int32(parsed.Episode),
+		EpisodeNumbers: episodeNumbersInt32(parsed.Episodes, parsed.Episode),
+		AbsoluteNumber: int32(parsed.AbsoluteNumber),
+		AirDate:        parsed.AirDate,
+	})
+	if err != nil {
+		slog.Debug("episode lookup for rename failed", "error", err)
+		return nil
+	}
+	return resp
 }
 
 func (m *Module) probeQuality(path string) string {
@@ -1424,8 +1529,8 @@ func (m *Module) AddWatchDir(ctx context.Context, req *scannerv1.AddWatchDirRequ
 		return nil, fmt.Errorf("path is required")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.db == nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("not initialized")
 	}
 
@@ -1438,24 +1543,28 @@ func (m *Module) AddWatchDir(ctx context.Context, req *scannerv1.AddWatchDirRequ
 
 	_, err := m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
 		id, req.GetPath(), mediaType, req.GetLibraryPath(), now)
+	m.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("insert watch dir: %w", err)
 	}
 
 	slog.Info("added watch directory", "path", req.GetPath(), "type", mediaType)
+	_ = m.syncWatches()
 	return &scannerv1.AddWatchDirResponse{Id: id}, nil
 }
 
 func (m *Module) RemoveWatchDir(ctx context.Context, req *scannerv1.RemoveWatchDirRequest) (*scannerv1.RemoveWatchDirResponse, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.db == nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("not initialized")
 	}
 	_, err := m.db.Exec(`DELETE FROM watch_dirs WHERE id = ?`, req.GetId())
+	m.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("delete watch dir: %w", err)
 	}
+	_ = m.syncWatches()
 	return &scannerv1.RemoveWatchDirResponse{}, nil
 }
 
@@ -1592,6 +1701,7 @@ var (
 	reSampleBase = regexp.MustCompile(`(?i)^(?:sample|samples|trailer)(?:[.\-_ ].*)?\.\w+$`)
 	reEdition    = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(directors?[.\-_ ]?cut|extended(?:[.\-_ ]?cut)?|theatrical|unrated|remastered|criterion|imax)(?:[.\-_ ]|$)`)
 	reGroup      = regexp.MustCompile(`(?i)-([A-Za-z0-9]+)(?:\.\w+)?$`)
+	reProper     = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(proper|repack)(?:[.\-_ ]|$)`)
 )
 
 func (m *Module) isSampleFile(name string, size int64) (reason string, reject bool) {
@@ -1614,6 +1724,21 @@ func parseEditionAndGroup(name string) (edition, group string) {
 		group = m[1]
 	}
 	return edition, group
+}
+
+func parseProperToken(name string) string {
+	m := reProper.FindStringSubmatch(name)
+	if len(m) < 2 {
+		return ""
+	}
+	switch strings.ToLower(m[1]) {
+	case "proper":
+		return "Proper"
+	case "repack":
+		return "Repack"
+	default:
+		return ""
+	}
 }
 
 var _ contracts.Module = (*Module)(nil)
