@@ -10,6 +10,7 @@ service ScannerService {
   rpc RemoveWatchDir(RemoveWatchDirRequest) returns (RemoveWatchDirResponse);
   rpc ListWatchDirs(ListWatchDirsRequest) returns (ListWatchDirsResponse);
   rpc ListImported(ListImportedRequest) returns (ListImportedResponse);
+  rpc ImportPath(ImportPathRequest) returns (ImportPathResponse);
 }
 
 message ScanRequest {}
@@ -95,4 +96,14 @@ message ImportedFile {
   int32 tmdb_id = 11;
   string imported_at = 12;
   string status = 13;
+}
+
+message ImportPathRequest {
+  string path = 1;
+}
+
+message ImportPathResponse {
+  int32 files_found = 1;
+  int32 files_imported = 2;
+  int32 files_skipped = 3;
 }

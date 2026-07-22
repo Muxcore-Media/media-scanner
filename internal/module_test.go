@@ -245,6 +245,61 @@ func TestScanCommand(t *testing.T) {
 	}
 }
 
+func TestImportPath(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "downloads")
+	libDir := filepath.Join(tmp, "library")
+	savePath := filepath.Join(srcDir, "Test.Movie.2020.1080p")
+	if err := os.MkdirAll(savePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(savePath, "Test.Movie.2020.1080p.mkv"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := m.ImportPath(ctx, &scannerv1.ImportPathRequest{Path: savePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesFound != 1 {
+		t.Errorf("expected 1 found, got %d", resp.FilesFound)
+	}
+	if resp.FilesImported != 1 {
+		t.Errorf("expected 1 imported, got %d", resp.FilesImported)
+	}
+
+	dest := filepath.Join(libDir, "Movies", "Test Movie (2020)", "Test Movie.2020.1080p.mkv")
+	if _, err := os.Stat(dest); os.IsNotExist(err) {
+		t.Fatal("imported file not found at destination:", dest)
+	}
+}
+
+func TestImportPathOutsideWatchDir(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	watch := t.TempDir()
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: watch}); err != nil {
+		t.Fatal(err)
+	}
+
+	outside := t.TempDir()
+	_, err := m.ImportPath(ctx, &scannerv1.ImportPathRequest{Path: outside})
+	if err == nil {
+		t.Fatal("expected error for path outside watch dirs")
+	}
+	if !strings.Contains(err.Error(), "not under any registered watch directory") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestListImported(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()
