@@ -7,6 +7,9 @@ require (
 	github.com/Muxcore-Media/core/pkg/contracts v0.0.0
 	github.com/Muxcore-Media/core/sdk/go/client v0.1.0
 	github.com/Muxcore-Media/core/sdk/go/module v0.1.0
+	github.com/Muxcore-Media/media-ffprobe v0.1.0
+	github.com/Muxcore-Media/media-rename v0.1.0
+	github.com/Muxcore-Media/media-subtitles v0.1.0
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.52.0
@@ -34,3 +37,9 @@ replace github.com/Muxcore-Media/core/sdk/go/module => ../core/sdk/go/module
 replace github.com/Muxcore-Media/core/sdk/go/client => ../core/sdk/go/client
 
 replace github.com/Muxcore-Media/core/pkg/contracts => ../core/pkg/contracts
+
+replace github.com/Muxcore-Media/media-rename => ../media-rename
+
+replace github.com/Muxcore-Media/media-ffprobe => ../media-ffprobe
+
+replace github.com/Muxcore-Media/media-subtitles => ../media-subtitles

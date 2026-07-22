@@ -4,6 +4,7 @@ option go_package = "github.com/Muxcore-Media/media-scanner/proto/scannerv1;scan
 
 service ScannerService {
   rpc Scan(ScanRequest) returns (ScanResponse);
+  rpc ScanLibraryRoots(ScanLibraryRootsRequest) returns (ScanLibraryRootsResponse);
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
   rpc AddWatchDir(AddWatchDirRequest) returns (AddWatchDirResponse);
   rpc RemoveWatchDir(RemoveWatchDirRequest) returns (RemoveWatchDirResponse);
@@ -14,6 +15,14 @@ service ScannerService {
 message ScanRequest {}
 
 message ScanResponse {
+  int32 files_found = 1;
+  int32 files_imported = 2;
+  int32 files_skipped = 3;
+}
+
+message ScanLibraryRootsRequest {}
+
+message ScanLibraryRootsResponse {
   int32 files_found = 1;
   int32 files_imported = 2;
   int32 files_skipped = 3;

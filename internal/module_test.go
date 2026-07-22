@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,8 +14,10 @@ import (
 func newTestModule(t *testing.T) *Module {
 	t.Helper()
 	m := NewModule(Config{
-		DBPath:   filepath.Join(t.TempDir(), "scanner.db"),
-		GRPCAddr: ":0",
+		DBPath:        filepath.Join(t.TempDir(), "scanner.db"),
+		GRPCAddr:      ":0",
+		ImportMode:    "move",
+		MinVideoBytes: -1,
 	})
 	ctx := context.Background()
 	if err := m.Init(ctx); err != nil {
@@ -130,6 +133,47 @@ func TestImportTVShow(t *testing.T) {
 	destFile := filepath.Join(libPath, "TV", "Breaking Bad", "Season 05", "Breaking Bad.S05E01.1080p.BluRay.mkv")
 	if _, err := os.Stat(destFile); os.IsNotExist(err) {
 		t.Fatal("imported TV file not found at destination:", destFile)
+	}
+}
+
+func TestImportFileWithSidecarSubtitle(t *testing.T) {
+	m := newTestModule(t)
+
+	tmp := t.TempDir()
+	srcFile := filepath.Join(tmp, "Inception.2010.1080p.mkv")
+	srcSub := filepath.Join(tmp, "Inception.2010.1080p.en.srt")
+	if err := os.WriteFile(srcFile, []byte("fake media"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srcSub, []byte("1\n00:00:01,000 --> 00:00:02,000\nHi\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	libPath := filepath.Join(tmp, "library")
+	if !m.importFile(srcFile, "Inception.2010.1080p.mkv", "movie", libPath) {
+		t.Fatal("expected import to succeed")
+	}
+
+	destSub := filepath.Join(libPath, "Movies", "Inception (2010)", "Inception.2010.1080p.en.srt")
+	if _, err := os.Stat(destSub); os.IsNotExist(err) {
+		t.Fatal("sidecar subtitle not imported:", destSub)
+	}
+	if _, err := os.Stat(srcSub); !os.IsNotExist(err) {
+		t.Fatal("source subtitle should have been removed")
+	}
+}
+
+func TestImportDegradesWithoutCapabilities(t *testing.T) {
+	m := newTestModule(t)
+	// mc is nil: rename/ffprobe/subtitles discovery no-ops; local import still works.
+	tmp := t.TempDir()
+	srcFile := filepath.Join(tmp, "Dune.2021.2160p.mkv")
+	if err := os.WriteFile(srcFile, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	libPath := filepath.Join(tmp, "library")
+	if !m.importFile(srcFile, "Dune.2021.2160p.mkv", "movie", libPath) {
+		t.Fatal("import should succeed without renamer/ffprobe")
 	}
 }
 
@@ -310,6 +354,48 @@ func TestParseFileNameTV(t *testing.T) {
 	}
 }
 
+func TestParseFileNameMultiEpAndAbsolute(t *testing.T) {
+	p := parseFileName("Show.Name.S01E01-E03.1080p.mkv")
+	if p.MediaType != "tv" || p.Season != 1 || len(p.Episodes) != 3 {
+		t.Fatalf("multi-ep range: %+v", p)
+	}
+	if p.Episodes[0] != 1 || p.Episodes[2] != 3 {
+		t.Fatalf("episodes: %v", p.Episodes)
+	}
+
+	p = parseFileName("Show.Name.S01E01E02.mkv")
+	if len(p.Episodes) != 2 || p.Episodes[1] != 2 {
+		t.Fatalf("multi-ep chain: %v", p.Episodes)
+	}
+
+	p = parseFileName("Anime.Title.-.150.mkv")
+	if p.AbsoluteNumber != 150 || p.MediaType != "tv" {
+		t.Fatalf("absolute dash: %+v", p)
+	}
+
+	p = parseFileName("Anime.Title.[042].mkv")
+	if p.AbsoluteNumber != 42 {
+		t.Fatalf("absolute bracket: %d", p.AbsoluteNumber)
+	}
+
+	p = parseFileName("Show.S01.Complete.1080p.mkv")
+	if !p.SeasonPack {
+		t.Fatal("expected season pack flag")
+	}
+
+	p = parseFileName("Daily.Show.2024.03.15.720p.mkv")
+	if p.MediaType != "tv" || p.AirDate != "2024-03-15" {
+		t.Fatalf("air date: %+v", p)
+	}
+	if !strings.Contains(strings.ToLower(p.Title), "daily") {
+		t.Fatalf("air date title: %q", p.Title)
+	}
+
+	if tag := formatEpisodeTag(1, []int{1, 2, 3}, 0); tag != "S01E01-E03" {
+		t.Fatalf("tag=%s", tag)
+	}
+}
+
 func TestIsMediaExt(t *testing.T) {
 	exts := []string{".mkv", ".mp4", ".avi", ".m4v", ".mov"}
 	for _, e := range exts {
@@ -322,5 +408,121 @@ func TestIsMediaExt(t *testing.T) {
 	}
 	if isMediaExt(".srt") {
 		t.Error("expected .srt not to be a media extension")
+	}
+}
+
+func TestImportHardlinkKeepsSource(t *testing.T) {
+	m := NewModule(Config{
+		DBPath:        filepath.Join(t.TempDir(), "scanner.db"),
+		GRPCAddr:      ":0",
+		ImportMode:    "hardlink",
+		MinVideoBytes: -1,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Stop(ctx) })
+
+	tmp := t.TempDir()
+	srcFile := filepath.Join(tmp, "Fight.Club.1999.1080p.BluRay.mkv")
+	if err := os.WriteFile(srcFile, []byte("fake media"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	libPath := filepath.Join(tmp, "library")
+	if !m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", "movie", libPath) {
+		t.Fatal("expected import to succeed")
+	}
+	if _, err := os.Stat(srcFile); err != nil {
+		t.Fatal("source should remain after hardlink")
+	}
+	dest := filepath.Join(libPath, "Movies", "Fight Club (1999)", "Fight Club.1999.1080p.BluRay.mkv")
+	if _, err := os.Stat(dest); err != nil {
+		t.Fatal("dest missing:", dest)
+	}
+}
+
+func TestSampleRejection(t *testing.T) {
+	m := NewModule(Config{
+		DBPath:         filepath.Join(t.TempDir(), "scanner.db"),
+		GRPCAddr:       ":0",
+		ImportMode:     "move",
+		MinVideoBytes:  -1,
+		SampleMaxBytes: 200 * 1024 * 1024,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Stop(ctx) })
+
+	if reason, reject := m.isSampleFile("Movie.Sample.mkv", 50*1024*1024); !reject {
+		t.Fatalf("expected sample reject, reason=%q", reason)
+	}
+	if _, reject := m.isSampleFile("sample.mkv", 10*1024); !reject {
+		t.Fatal("expected sample.mkv reject")
+	}
+	if _, reject := m.isSampleFile("Fight.Club.1999.1080p.mkv", 50*1024*1024); reject {
+		t.Fatal("normal release should not reject")
+	}
+
+	m.minVideoBytes = 5 * 1024 * 1024
+	if _, reject := m.isSampleFile("Fight.Club.1999.1080p.mkv", 1024); !reject {
+		t.Fatal("tiny video should reject")
+	}
+}
+
+func TestParseEditionAndGroup(t *testing.T) {
+	ed, grp := parseEditionAndGroup("Movie.1999.Directors.Cut.1080p-GROUP.mkv")
+	if ed == "" {
+		t.Error("expected edition")
+	}
+	if grp != "GROUP" {
+		t.Errorf("group=%q", grp)
+	}
+}
+
+func TestScanLibraryRootsInPlace(t *testing.T) {
+	tmp := t.TempDir()
+	lib := filepath.Join(tmp, "library")
+	movieDir := filepath.Join(lib, "Movies", "Fight Club (1999)")
+	if err := os.MkdirAll(movieDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	moviePath := filepath.Join(movieDir, "Fight.Club.1999.1080p.mkv")
+	if err := os.WriteFile(moviePath, []byte("video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewModule(Config{
+		DBPath:        filepath.Join(tmp, "scanner.db"),
+		GRPCAddr:      ":0",
+		LibraryRoot:   lib,
+		ImportMode:    "move",
+		MinVideoBytes: -1,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Stop(ctx) })
+
+	resp, err := m.ScanLibraryRoots(ctx, &scannerv1.ScanLibraryRootsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesImported < 1 {
+		t.Fatalf("expected import, got %+v", resp)
+	}
+	if _, err := os.Stat(moviePath); err != nil {
+		t.Fatal("library file must remain in place")
+	}
+
+	resp2, err := m.ScanLibraryRoots(ctx, &scannerv1.ScanLibraryRootsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp2.FilesImported != 0 || resp2.FilesSkipped < 1 {
+		t.Fatalf("second scan should skip: %+v", resp2)
 	}
 }
