@@ -10,15 +10,18 @@
 
 ## v0.2.0 (Planned)
 
-- [ ] Library module integration — update media-movies/media-tvshows on import
-- [ ] Quality detection from file metadata (ffprobe integration)
-- [ ] Hardlink support (instead of move)
-- [ ] Sample file detection and rejection
-- [ ] Subtitle file import alongside video
-- [ ] Event publishing on import complete
+- [x] Library module integration — update media-movies/media-tvshows on import
+- [x] Quality detection from file metadata (ffprobe integration)
+- [x] Hardlink support (instead of move)
+- [x] Sample file detection and rejection
+- [x] Subtitle file import alongside video
+- [x] Subtitle sidecar catalog registration via media-subtitles
+- [x] Event publishing on import complete
 
 ## Future
 
 - [ ] fsnotify/inotify-based real-time watching
 - [ ] Multiple naming convention templates
 - [ ] Extraction of archives (rar, zip) before scanning
+- [x] Multi-episode / absolute / season-pack filename parsing
+- [x] Rescan existing library roots (in-place)

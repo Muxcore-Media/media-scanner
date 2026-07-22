@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -16,8 +17,12 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
+	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
+	renamev1 "github.com/Muxcore-Media/media-rename/proto/renamev1"
 	scannerv1 "github.com/Muxcore-Media/media-scanner/proto/scannerv1"
+	subtv1 "github.com/Muxcore-Media/media-subtitles/proto/subtv1"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	"github.com/Muxcore-Media/core/sdk/go/client"
@@ -36,6 +41,9 @@ type Module struct {
 	grpcAddr        string
 	libraryRoot     string
 	defaultWatchDir string
+	importMode      string
+	sampleMaxBytes  int64
+	minVideoBytes   int64
 	grpcSrv         *grpc.Server
 	grpcLis         net.Listener
 }
@@ -46,6 +54,9 @@ type Config struct {
 	GRPCAddr        string
 	LibraryRoot     string
 	DefaultWatchDir string
+	ImportMode      string
+	SampleMaxBytes  int64
+	MinVideoBytes   int64
 }
 
 func NewModule(cfg Config) *Module {
@@ -61,6 +72,15 @@ func NewModule(cfg Config) *Module {
 	if cfg.LibraryRoot == "" {
 		cfg.LibraryRoot = "/data/media"
 	}
+	if cfg.SampleMaxBytes <= 0 {
+		cfg.SampleMaxBytes = 200 * 1024 * 1024
+	}
+	minVideo := int64(5 * 1024 * 1024)
+	if cfg.MinVideoBytes < 0 {
+		minVideo = 0
+	} else if cfg.MinVideoBytes > 0 {
+		minVideo = cfg.MinVideoBytes
+	}
 	if v := os.Getenv("SCANNER_DB_PATH"); v != "" {
 		cfg.DBPath = v
 	}
@@ -73,12 +93,32 @@ func NewModule(cfg Config) *Module {
 	if v := os.Getenv("SCANNER_DEFAULT_WATCH_DIR"); v != "" {
 		cfg.DefaultWatchDir = v
 	}
+	if v := os.Getenv("SCANNER_IMPORT_MODE"); v != "" {
+		cfg.ImportMode = v
+	}
+	if v := os.Getenv("SCANNER_SAMPLE_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cfg.SampleMaxBytes = n
+		}
+	}
+	if v := os.Getenv("SCANNER_MIN_VIDEO_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			if n < 0 {
+				minVideo = 0
+			} else {
+				minVideo = n
+			}
+		}
+	}
 	return &Module{
 		id:              cfg.ID,
 		dbPath:          cfg.DBPath,
 		grpcAddr:        cfg.GRPCAddr,
 		libraryRoot:     cfg.LibraryRoot,
 		defaultWatchDir: cfg.DefaultWatchDir,
+		importMode:      normalizeImportMode(cfg.ImportMode),
+		sampleMaxBytes:  cfg.SampleMaxBytes,
+		minVideoBytes:   minVideo,
 	}
 }
 
@@ -376,6 +416,16 @@ func (m *Module) scanDirectory(watchPath, mediaType, libPath string) (found, imp
 			continue
 		}
 
+		var size int64
+		if info, err := entry.Info(); err == nil {
+			size = info.Size()
+		}
+		if reason, reject := m.isSampleFile(entry.Name(), size); reject {
+			slog.Info("skipping sample/junk file", "file", entry.Name(), "reason", reason, "size", size)
+			skipped++
+			continue
+		}
+
 		result := m.importFile(fullPath, entry.Name(), mediaType, libPath)
 		if result {
 			imported++
@@ -397,7 +447,7 @@ func isMediaExt(ext string) bool {
 func (m *Module) isAlreadyImported(path string) bool {
 	var count int
 	m.mu.RLock()
-	m.db.QueryRow(`SELECT COUNT(*) FROM imported_files WHERE original_path = ?`, path).Scan(&count)
+	m.db.QueryRow(`SELECT COUNT(*) FROM imported_files WHERE original_path = ? OR destination_path = ?`, path, path).Scan(&count)
 	m.mu.RUnlock()
 	return count > 0
 }
@@ -405,6 +455,15 @@ func (m *Module) isAlreadyImported(path string) bool {
 // ── File Import ────────────────────────────────────────────────
 
 func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool {
+	var size int64
+	if info, err := os.Stat(fullPath); err == nil {
+		size = info.Size()
+	}
+	if reason, reject := m.isSampleFile(fileName, size); reject {
+		slog.Info("skipping sample/junk file", "file", fileName, "reason", reason, "size", size)
+		return false
+	}
+
 	parsed := parseFileName(fileName)
 	if parsed.Title == "" {
 		slog.Debug("unable to parse filename", "file", fileName)
@@ -416,16 +475,12 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		return false
 	}
 
-	// Build the logical storage key and local destination path.
-	storageKey := m.buildStorageKey(parsed)
+	storageKey, destPath := m.resolveImportPaths(parsed, libPath, fullPath)
 	if storageKey == "" {
 		slog.Debug("unable to build storage key", "file", fileName)
 		return false
 	}
-	destPath := m.buildDestPath(parsed, libPath)
 
-	// Store file via core storage gRPC API. Only core's storage provider
-	// has direct filesystem access to the media library volume.
 	if m.mc != nil {
 		f, err := os.Open(fullPath)
 		if err != nil {
@@ -438,32 +493,49 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 			return false
 		}
 		f.Close()
+		if err := os.Remove(fullPath); err != nil {
+			slog.Debug("remove source after storage put", "src", fullPath, "error", err)
+		}
 	} else {
-		// Fallback: direct filesystem move (no core connection).
 		destDir := filepath.Dir(destPath)
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			slog.Error("create destination directory", "path", destDir, "error", err)
 			return false
 		}
-		if err := os.Rename(fullPath, destPath); err != nil {
-			slog.Error("move file", "src", fullPath, "dst", destPath, "error", err)
+		if err := placeFile(fullPath, destPath, m.importMode); err != nil {
+			slog.Error("place file", "src", fullPath, "dst", destPath, "mode", m.importMode, "error", err)
 			return false
 		}
 	}
 
-	// Remove source file after successful storage.
-	os.Remove(fullPath)
+	quality := parsed.Quality
+	analyzePath := destPath
+	if _, err := os.Stat(analyzePath); err != nil {
+		analyzePath = fullPath
+	}
+	if q := m.probeQuality(analyzePath); q != "" {
+		quality = q
+	}
+
+	m.importSidecarSubtitles(fullPath, destPath, storageKey)
+	m.detectEmbeddedSubtitles(analyzePath)
+
+	if m.importMode == "move" {
+		if _, err := os.Stat(fullPath); err == nil {
+			os.Remove(fullPath)
+		}
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
 
 	m.mu.Lock()
 	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
-		importID, fullPath, storageKey, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, parsed.Quality, parsed.TMDBID, now,
+		importID, fullPath, storageKey, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
 	)
 	m.mu.Unlock()
 
-	slog.Info("imported file", "src", fileName, "key", storageKey, "type", parsed.MediaType, "title", parsed.Title)
+	slog.Info("imported file", "src", fileName, "key", storageKey, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
 
 	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
 		"original_path":    fullPath,
@@ -474,10 +546,337 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		"year":             parsed.Year,
 		"season_number":    parsed.Season,
 		"episode_number":   parsed.Episode,
-		"quality":          parsed.Quality,
+		"episode_numbers":  episodeNumbersInt32(parsed.Episodes, parsed.Episode),
+		"absolute_number":  parsed.AbsoluteNumber,
+		"air_date":         parsed.AirDate,
+		"season_pack":      parsed.SeasonPack,
+		"quality":          quality,
+		"tmdb_id":          parsed.TMDBID,
 	})
 
 	return true
+}
+
+func (m *Module) resolveImportPaths(parsed parsedFile, libPath, fullPath string) (storageKey, destPath string) {
+	storageKey = m.buildStorageKey(parsed)
+	destPath = m.buildDestPath(parsed, libPath)
+	if preview := m.previewRename(fullPath, parsed); preview != nil && preview.GetNewPath() != "" {
+		folder := "Other"
+		switch parsed.MediaType {
+		case "movie":
+			folder = "Movies"
+		case "tv":
+			folder = "TV"
+		}
+		rel := filepath.Clean(preview.GetNewPath())
+		storageKey = filepath.ToSlash(filepath.Join("media", folder, rel))
+		root := libPath
+		if root == "" {
+			root = m.libraryRoot
+		}
+		destPath = filepath.Join(root, folder, rel)
+	}
+	return storageKey, destPath
+}
+
+func (m *Module) findCapabilityAddr(ctx context.Context, capability string) (string, error) {
+	if m.mc == nil {
+		return "", fmt.Errorf("not connected to core")
+	}
+	modules, err := m.mc.Discovery.FindByCapability(ctx, capability)
+	if err != nil {
+		return "", err
+	}
+	for _, mod := range modules {
+		if mod.HttpAddr != "" {
+			return mod.HttpAddr, nil
+		}
+	}
+	return "", fmt.Errorf("no %s module found", capability)
+}
+
+func (m *Module) previewRename(fullPath string, parsed parsedFile) *renamev1.PreviewResponse {
+	ctx := context.Background()
+	addr, err := m.findCapabilityAddr(ctx, "media.renamer")
+	if err != nil {
+		return nil
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	cli := renamev1.NewRenameServiceClient(conn)
+
+	edition, group := parseEditionAndGroup(parsed.FileName)
+	req := &renamev1.PreviewRequest{
+		FilePath:       fullPath,
+		MediaType:      parsed.MediaType,
+		Title:          parsed.Title,
+		Year:           int32(parsed.Year),
+		SeasonNumber:   int32(parsed.Season),
+		EpisodeNumber:  int32(parsed.Episode),
+		EpisodeNumbers: episodeNumbersInt32(parsed.Episodes, parsed.Episode),
+		AbsoluteNumber: int32(parsed.AbsoluteNumber),
+		Quality:        parsed.Quality,
+		Extension:      filepath.Ext(parsed.FileName),
+		Edition:        edition,
+		ReleaseGroup:   group,
+	}
+	if parsed.TMDBID > 0 {
+		req.TmdbId = strconv.Itoa(parsed.TMDBID)
+	}
+	if meta := m.probeRenameMeta(fullPath); meta != nil {
+		if meta.Resolution != "" {
+			req.Resolution = meta.Resolution
+		}
+		if meta.Source != "" {
+			req.Source = meta.Source
+		}
+		if meta.VideoCodec != "" {
+			req.VideoCodec = meta.VideoCodec
+		}
+		if meta.AudioCodec != "" {
+			req.AudioCodec = meta.AudioCodec
+		}
+		if meta.AudioChannels != "" {
+			req.AudioChannels = meta.AudioChannels
+		}
+	}
+
+	resp, err := cli.Preview(ctx, req)
+	if err != nil {
+		slog.Debug("rename preview failed", "error", err)
+		return nil
+	}
+	return resp
+}
+
+type renameProbeMeta struct {
+	Resolution    string
+	Source        string
+	VideoCodec    string
+	AudioCodec    string
+	AudioChannels string
+}
+
+func (m *Module) probeRenameMeta(path string) *renameProbeMeta {
+	if path == "" {
+		return nil
+	}
+	ctx := context.Background()
+	addr, err := m.findCapabilityAddr(ctx, "media.analyzer")
+	if err != nil {
+		return nil
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	cli := ffprobev1.NewAnalysisServiceClient(conn)
+	resp, err := cli.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: path})
+	if err != nil || resp.GetError() != "" {
+		return nil
+	}
+	meta := &renameProbeMeta{}
+	if q := resp.GetQuality(); q != nil {
+		meta.Resolution = q.GetResolution()
+		meta.Source = q.GetSource()
+		meta.VideoCodec = q.GetCodecGroup()
+	}
+	if v := resp.GetVideo(); v != nil {
+		if meta.Resolution == "" {
+			meta.Resolution = v.GetResolutionLabel()
+		}
+		if meta.VideoCodec == "" {
+			meta.VideoCodec = v.GetCodec()
+		}
+	}
+	if audios := resp.GetAudio(); len(audios) > 0 {
+		a := audios[0]
+		meta.AudioCodec = a.GetCodec()
+		if a.GetChannels() > 0 {
+			meta.AudioChannels = strconv.Itoa(int(a.GetChannels()))
+		} else if a.GetChannelLayout() != "" {
+			meta.AudioChannels = a.GetChannelLayout()
+		}
+	}
+	return meta
+}
+
+func (m *Module) probeQuality(path string) string {
+	if path == "" {
+		return ""
+	}
+	ctx := context.Background()
+	addr, err := m.findCapabilityAddr(ctx, "media.analyzer")
+	if err != nil {
+		return ""
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	cli := ffprobev1.NewAnalysisServiceClient(conn)
+	resp, err := cli.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: path})
+	if err != nil {
+		slog.Debug("ffprobe analyze failed", "path", path, "error", err)
+		return ""
+	}
+	if resp.GetError() != "" {
+		slog.Debug("ffprobe analyze failed", "path", path, "resp_error", resp.GetError())
+		return ""
+	}
+	if q := resp.GetQuality(); q != nil && q.GetLabel() != "" {
+		return q.GetLabel()
+	}
+	if v := resp.GetVideo(); v != nil && v.GetResolutionLabel() != "" {
+		return v.GetResolutionLabel()
+	}
+	return ""
+}
+
+var sidecarSubtitleExts = map[string]bool{
+	".srt": true,
+	".ass": true,
+	".ssa": true,
+	".sub": true,
+	".vtt": true,
+}
+
+func (m *Module) importSidecarSubtitles(srcVideo, destVideo, storageKey string) {
+	srcDir := filepath.Dir(srcVideo)
+	base := strings.TrimSuffix(filepath.Base(srcVideo), filepath.Ext(srcVideo))
+	destStem := strings.TrimSuffix(filepath.Base(destVideo), filepath.Ext(destVideo))
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return
+	}
+	destDir := filepath.Dir(destVideo)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		if !sidecarSubtitleExts[ext] {
+			continue
+		}
+		stem := strings.TrimSuffix(name, filepath.Ext(name))
+		if !strings.HasPrefix(stem, base) {
+			continue
+		}
+		suffix := strings.TrimPrefix(stem, base) // e.g. ".en" or ".en.forced"
+		destName := destStem + suffix + ext
+		srcSub := filepath.Join(srcDir, name)
+		destSub := filepath.Join(destDir, destName)
+		subKey := filepath.ToSlash(filepath.Join(filepath.Dir(storageKey), destName))
+
+		registeredPath := ""
+		if m.mc != nil {
+			f, err := os.Open(srcSub)
+			if err != nil {
+				continue
+			}
+			if err := m.mc.Storage.Put(context.Background(), subKey, f); err != nil {
+				f.Close()
+				slog.Debug("storage put subtitle failed", "key", subKey, "error", err)
+			} else {
+				f.Close()
+				os.Remove(srcSub)
+			}
+			continue
+		}
+		if err := os.MkdirAll(destDir, 0755); err != nil {
+			continue
+		}
+		if err := copyFile(srcSub, destSub); err != nil {
+			slog.Debug("copy subtitle failed", "src", srcSub, "error", err)
+			continue
+		}
+		os.Remove(srcSub)
+		registeredPath = destSub
+		m.registerSidecarSubtitle(storageKey, registeredPath)
+	}
+}
+
+func (m *Module) registerSidecarSubtitle(mediaFileID, filePath string) {
+	if mediaFileID == "" || filePath == "" {
+		return
+	}
+	if _, err := os.Stat(filePath); err != nil {
+		return
+	}
+	ctx := context.Background()
+	addr, err := m.findCapabilityAddr(ctx, "media.subtitles")
+	if err != nil {
+		return
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	cli := subtv1.NewSubtitleServiceClient(conn)
+	resp, err := cli.RegisterSidecar(ctx, &subtv1.RegisterSidecarRequest{
+		MediaFileId: mediaFileID,
+		FilePath:    filePath,
+	})
+	if err != nil {
+		slog.Debug("register sidecar failed", "path", filePath, "error", err)
+		return
+	}
+	if resp.GetAlreadyRegistered() {
+		return
+	}
+	if sub := resp.GetSubtitle(); sub != nil {
+		slog.Info("registered sidecar subtitle", "id", sub.GetId(), "lang", sub.GetLanguage(), "media", mediaFileID)
+	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func (m *Module) detectEmbeddedSubtitles(path string) {
+	if path == "" {
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	ctx := context.Background()
+	addr, err := m.findCapabilityAddr(ctx, "media.subtitles")
+	if err != nil {
+		return
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	cli := subtv1.NewSubtitleServiceClient(conn)
+	resp, err := cli.DetectEmbedded(ctx, &subtv1.DetectEmbeddedRequest{FilePath: path})
+	if err != nil {
+		slog.Debug("detect embedded subtitles failed", "path", path, "error", err)
+		return
+	}
+	if n := len(resp.GetSubtitles()); n > 0 {
+		slog.Info("detected embedded subtitles", "path", path, "count", n)
+	}
 }
 
 func (m *Module) buildStorageKey(p parsedFile) string {
@@ -496,9 +895,10 @@ func (m *Module) buildStorageKey(p parsedFile) string {
 		return filepath.Join("media", "Movies", safeTitle+yearStr, base)
 	case "tv":
 		seasonDir := fmt.Sprintf("Season %02d", p.Season)
-		epBase := fmt.Sprintf("%s.S%02dE%02d", safeTitle, p.Season, p.Episode)
+		tag := formatEpisodeTag(p.Season, p.Episodes, p.AbsoluteNumber)
+		epBase := fmt.Sprintf("%s.%s", safeTitle, tag)
 		if p.Quality != "" {
-			epBase = fmt.Sprintf("%s.S%02dE%02d.%s", safeTitle, p.Season, p.Episode, p.Quality)
+			epBase = fmt.Sprintf("%s.%s.%s", safeTitle, tag, p.Quality)
 		}
 		return filepath.Join("media", "TV", safeTitle, seasonDir, epBase+ext)
 	default:
@@ -529,9 +929,10 @@ func (m *Module) buildDestPath(p parsedFile, libPath string) string {
 
 	case "tv":
 		seasonDir := fmt.Sprintf("Season %02d", p.Season)
-		epBase := fmt.Sprintf("%s.S%02dE%02d", safeTitle, p.Season, p.Episode)
+		tag := formatEpisodeTag(p.Season, p.Episodes, p.AbsoluteNumber)
+		epBase := fmt.Sprintf("%s.%s", safeTitle, tag)
 		if p.Quality != "" {
-			epBase = fmt.Sprintf("%s.S%02dE%02d.%s", safeTitle, p.Season, p.Episode, p.Quality)
+			epBase = fmt.Sprintf("%s.%s.%s", safeTitle, tag, p.Quality)
 		}
 		dir := filepath.Join(root, "TV", safeTitle, seasonDir)
 		return filepath.Join(dir, epBase+ext)
@@ -546,10 +947,18 @@ func (m *Module) buildDestPath(p parsedFile, libPath string) string {
 var (
 	reMovie = regexp.MustCompile(`(?i)^(.+?)[.\s-_]+(\d{4})(?:[.\s-_]+(.+))?\.\w+$`)
 
-	reTVSeasonEpisode = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,2})[.\s-_]+`)
-	reTVSeasonEpLong  = regexp.MustCompile(`(?i)[.\s-_]+(\d{1,2})x(\d{1,2})[.\s-_]+`)
-	reTVSeasonOnly    = regexp.MustCompile(`(?i)[.\s-_]+Season[.\s-_]+(\d{1,2})[.\s-_]+`)
-	reTVEpisodeOnly   = regexp.MustCompile(`(?i)[.\s-_]+Episode[.\s-_]+(\d{1,2})[.\s-_]+`)
+	reTVMultiEpRange  = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})-E?(\d{1,3})(?:[.\s-_]|$|\.)`)
+	reTVMultiEpChain  = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})((?:E\d{1,3}){1,20})(?:[.\s-_]|$|\.)`)
+	reTVNxNRange      = regexp.MustCompile(`(?i)[.\s-_]+(\d{1,2})x(\d{1,3})-(\d{1,2})x(\d{1,3})(?:[.\s-_]|$|\.)`)
+	reTVSeasonEpisode = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})(?:[.\s-_]|$|\.)`)
+	reTVSeasonEpLong  = regexp.MustCompile(`(?i)[.\s-_]+(\d{1,2})x(\d{1,3})(?:[.\s-_]|$|\.)`)
+	reTVSeasonOnly    = regexp.MustCompile(`(?i)[.\s-_]+Season[.\s-_]+(\d{1,2})(?:[.\s-_]|$|\.)`)
+	reTVEpisodeOnly   = regexp.MustCompile(`(?i)[.\s-_]+Episode[.\s-_]+(\d{1,3})(?:[.\s-_]|$|\.)`)
+	reTVAirDate       = regexp.MustCompile(`(?i)[.\s-_]+(20\d{2}|19\d{2})[.\s-_](\d{2})[.\s-_](\d{2})(?:[.\s-_]|$|\.)`)
+	reAbsoluteBracket = regexp.MustCompile(`(?i)\[(\d{2,4})\]`)
+	reAbsoluteEP      = regexp.MustCompile(`(?i)[.\s-_](?:EP|E)(\d{2,4})(?:[.\s-_]|$|\.)`)
+	reAbsoluteDash    = regexp.MustCompile(`(?i)-\.?(\d{2,4})(?:[.\s-_]|$)`)
+	reSeasonPack      = regexp.MustCompile(`(?i)(?:season[.\s_-]*pack|complete[.\s_-]*season|season[.\s_-]*\d{1,2}[.\s_-]*complete|S\d{1,2}[.\s_-]*(?:complete|pack))`)
 
 	reQuality = regexp.MustCompile(`(?i)(\d{3,4}[pi]|4k|uhd)[.\s-_]*(remux|bluray|brrip|bdrip|blu-ray|web[-\s]?dl|webdl|webrip|hdtv)?`)
 
@@ -557,28 +966,70 @@ var (
 )
 
 type parsedFile struct {
-	FileName  string
-	Title     string
-	Year      int
-	Season    int
-	Episode   int
-	Quality   string
-	MediaType string
-	TMDBID    int
+	FileName       string
+	Title          string
+	Year           int
+	Season         int
+	Episode        int
+	Episodes       []int
+	AbsoluteNumber int
+	AirDate        string // YYYY-MM-DD
+	SeasonPack     bool
+	Quality        string
+	MediaType      string
+	TMDBID         int
 }
 
 func parseFileName(fileName string) parsedFile {
 	result := parsedFile{FileName: fileName}
+	result.SeasonPack = reSeasonPack.MatchString(fileName)
 
-	if m := reTVSeasonEpisode.FindStringSubmatch(fileName); len(m) >= 3 {
+	if m := reTVMultiEpRange.FindStringSubmatch(fileName); len(m) >= 4 {
+		result.MediaType = "tv"
+		result.Season, _ = strconv.Atoi(m[1])
+		start, _ := strconv.Atoi(m[2])
+		end, _ := strconv.Atoi(m[3])
+		result.Episodes = episodeRange(start, end)
+		result.Episode = start
+		result.Title = extractTVTitle(fileName, m[0])
+	} else if m := reTVMultiEpChain.FindStringSubmatch(fileName); len(m) >= 4 {
+		result.MediaType = "tv"
+		result.Season, _ = strconv.Atoi(m[1])
+		first, _ := strconv.Atoi(m[2])
+		result.Episodes = []int{first}
+		for _, part := range reTVEpToken.FindAllStringSubmatch(m[3], -1) {
+			if len(part) >= 2 {
+				n, _ := strconv.Atoi(part[1])
+				result.Episodes = append(result.Episodes, n)
+			}
+		}
+		result.Episode = first
+		result.Title = extractTVTitle(fileName, m[0])
+	} else if m := reTVNxNRange.FindStringSubmatch(fileName); len(m) >= 5 {
+		result.MediaType = "tv"
+		result.Season, _ = strconv.Atoi(m[1])
+		start, _ := strconv.Atoi(m[2])
+		endSeason, _ := strconv.Atoi(m[3])
+		end, _ := strconv.Atoi(m[4])
+		if endSeason == result.Season {
+			result.Episodes = episodeRange(start, end)
+			result.Episode = start
+		} else {
+			result.Episode = start
+			result.Episodes = []int{start}
+		}
+		result.Title = extractTVTitle(fileName, m[0])
+	} else if m := reTVSeasonEpisode.FindStringSubmatch(fileName); len(m) >= 3 {
 		result.MediaType = "tv"
 		result.Season, _ = strconv.Atoi(m[1])
 		result.Episode, _ = strconv.Atoi(m[2])
+		result.Episodes = []int{result.Episode}
 		result.Title = extractTVTitle(fileName, m[0])
 	} else if m := reTVSeasonEpLong.FindStringSubmatch(fileName); len(m) >= 3 {
 		result.MediaType = "tv"
 		result.Season, _ = strconv.Atoi(m[1])
 		result.Episode, _ = strconv.Atoi(m[2])
+		result.Episodes = []int{result.Episode}
 		result.Title = extractTVTitle(fileName, m[0])
 	} else if reTVSeasonOnly.MatchString(fileName) || reTVEpisodeOnly.MatchString(fileName) {
 		result.MediaType = "tv"
@@ -587,8 +1038,20 @@ func parseFileName(fileName string) parsedFile {
 		}
 		if m := reTVEpisodeOnly.FindStringSubmatch(fileName); len(m) >= 2 {
 			result.Episode, _ = strconv.Atoi(m[1])
+			result.Episodes = []int{result.Episode}
 		}
 		result.Title = extractTVTitle(fileName, "")
+	} else if airDate, title, ok := parseAirDate(fileName); ok {
+		result.MediaType = "tv"
+		result.AirDate = airDate
+		result.Title = title
+		if len(airDate) >= 4 {
+			result.Year, _ = strconv.Atoi(airDate[:4])
+		}
+	} else if abs, ok := parseAbsoluteNumber(fileName); ok {
+		result.MediaType = "tv"
+		result.AbsoluteNumber = abs
+		result.Title = extractTVTitleAbsolute(fileName)
 	} else if m := reMovie.FindStringSubmatch(fileName); len(m) >= 3 {
 		result.MediaType = "movie"
 		result.Title = cleanTitle(m[1])
@@ -605,28 +1068,124 @@ func parseFileName(fileName string) parsedFile {
 	return result
 }
 
+var reTVEpToken = regexp.MustCompile(`(?i)E(\d{1,3})`)
+
+func episodeRange(start, end int) []int {
+	if end < start {
+		start, end = end, start
+	}
+	out := make([]int, 0, end-start+1)
+	for i := start; i <= end; i++ {
+		out = append(out, i)
+	}
+	return out
+}
+
+func parseAbsoluteNumber(fileName string) (int, bool) {
+	if m := reAbsoluteBracket.FindStringSubmatch(fileName); len(m) >= 2 {
+		n, _ := strconv.Atoi(m[1])
+		if n > 0 {
+			return n, true
+		}
+	}
+	if m := reAbsoluteEP.FindStringSubmatch(fileName); len(m) >= 2 {
+		n, _ := strconv.Atoi(m[1])
+		if n > 0 {
+			return n, true
+		}
+	}
+	if m := reAbsoluteDash.FindStringSubmatch(fileName); len(m) >= 2 {
+		n, _ := strconv.Atoi(m[1])
+		if n > 0 {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+func parseAirDate(fileName string) (airDate, title string, ok bool) {
+	m := reTVAirDate.FindStringSubmatch(fileName)
+	if len(m) < 4 {
+		return "", "", false
+	}
+	y, _ := strconv.Atoi(m[1])
+	mo, _ := strconv.Atoi(m[2])
+	d, _ := strconv.Atoi(m[3])
+	if y < 1900 || mo < 1 || mo > 12 || d < 1 || d > 31 {
+		return "", "", false
+	}
+	airDate = fmt.Sprintf("%04d-%02d-%02d", y, mo, d)
+	title = extractTVTitle(fileName, m[0])
+	return airDate, title, true
+}
+
+func formatEpisodeTag(season int, episodes []int, absolute int) string {
+	if absolute > 0 && len(episodes) == 0 && season == 0 {
+		return fmt.Sprintf("%03d", absolute)
+	}
+	if len(episodes) == 0 {
+		return fmt.Sprintf("S%02dE%02d", season, 0)
+	}
+	if len(episodes) == 1 {
+		return fmt.Sprintf("S%02dE%02d", season, episodes[0])
+	}
+	return fmt.Sprintf("S%02dE%02d-E%02d", season, episodes[0], episodes[len(episodes)-1])
+}
+
+func episodeNumbersInt32(episodes []int, fallback int) []int32 {
+	if len(episodes) == 0 {
+		if fallback > 0 {
+			return []int32{int32(fallback)}
+		}
+		return nil
+	}
+	out := make([]int32, len(episodes))
+	for i, e := range episodes {
+		out[i] = int32(e)
+	}
+	return out
+}
+
 func extractTVTitle(fileName, match string) string {
 	s := fileName
 	ext := filepath.Ext(s)
 	s = s[:len(s)-len(ext)]
 
 	if match != "" {
-		parts := strings.SplitN(s, match, 2)
-		if len(parts) > 0 {
-			return cleanTitle(parts[0])
+		idx := strings.Index(strings.ToLower(s), strings.ToLower(strings.Trim(match, ".-_ ")))
+		if idx < 0 {
+			parts := strings.SplitN(s, strings.TrimSpace(match), 2)
+			if len(parts) > 0 {
+				return cleanTitle(parts[0])
+			}
+		} else if idx > 0 {
+			return cleanTitle(s[:idx])
 		}
 	}
 
-	s = reTVSeasonEpisode.ReplaceAllString(s, "")
-	s = reTVSeasonEpLong.ReplaceAllString(s, "")
-	s = reTVSeasonOnly.ReplaceAllString(s, "")
-	s = reTVEpisodeOnly.ReplaceAllString(s, "")
+	s = reTVMultiEpRange.ReplaceAllString(s, " ")
+	s = reTVMultiEpChain.ReplaceAllString(s, " ")
+	s = reTVNxNRange.ReplaceAllString(s, " ")
+	s = reTVSeasonEpisode.ReplaceAllString(s, " ")
+	s = reTVSeasonEpLong.ReplaceAllString(s, " ")
+	s = reTVSeasonOnly.ReplaceAllString(s, " ")
+	s = reTVEpisodeOnly.ReplaceAllString(s, " ")
+	s = reTVAirDate.ReplaceAllString(s, " ")
+	return cleanTitle(s)
+}
+
+func extractTVTitleAbsolute(fileName string) string {
+	s := trimExt(fileName)
+	s = reAbsoluteBracket.ReplaceAllString(s, " ")
+	s = reAbsoluteEP.ReplaceAllString(s, " ")
+	s = reAbsoluteDash.ReplaceAllString(s, " ")
+	s = reSeasonPack.ReplaceAllString(s, " ")
 	return cleanTitle(s)
 }
 
 func extractQuality(name string) string {
 	m := reQuality.FindString(name)
-	return strings.TrimSpace(m)
+	return strings.Trim(m, ".-_ \t")
 }
 
 func cleanTitle(s string) string {
@@ -685,6 +1244,150 @@ func (m *Module) Scan(ctx context.Context, req *scannerv1.ScanRequest) (*scanner
 		FilesImported: int32(totalImported),
 		FilesSkipped:  int32(totalSkipped),
 	}, nil
+}
+
+func (m *Module) ScanLibraryRoots(ctx context.Context, req *scannerv1.ScanLibraryRootsRequest) (*scannerv1.ScanLibraryRootsResponse, error) {
+	roots := m.collectLibraryRoots()
+	if roots == nil {
+		return nil, fmt.Errorf("not initialized")
+	}
+	var totalFound, totalImported, totalSkipped int
+	for _, root := range roots {
+		for _, folder := range []struct {
+			name      string
+			mediaType string
+		}{
+			{"Movies", "movie"},
+			{"TV", "tv"},
+		} {
+			dir := filepath.Join(root, folder.name)
+			if _, err := os.Stat(dir); err != nil {
+				continue
+			}
+			found, imported, skipped := m.scanLibraryDirectory(dir, folder.mediaType)
+			totalFound += found
+			totalImported += imported
+			totalSkipped += skipped
+		}
+	}
+	return &scannerv1.ScanLibraryRootsResponse{
+		FilesFound:    int32(totalFound),
+		FilesImported: int32(totalImported),
+		FilesSkipped:  int32(totalSkipped),
+	}, nil
+}
+
+func (m *Module) collectLibraryRoots() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.db == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var roots []string
+	add := func(p string) {
+		p = filepath.Clean(p)
+		if p == "" || p == "." {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		roots = append(roots, p)
+	}
+	if m.libraryRoot != "" {
+		add(m.libraryRoot)
+	}
+	rows, err := m.db.Query(`SELECT DISTINCT library_path FROM watch_dirs WHERE library_path != ''`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var p string
+			if rows.Scan(&p) == nil {
+				add(p)
+			}
+		}
+	}
+	return roots
+}
+
+func (m *Module) scanLibraryDirectory(dir, mediaType string) (found, imported, skipped int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0, 0
+	}
+	for _, entry := range entries {
+		fullPath := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			f, i, s := m.scanLibraryDirectory(fullPath, mediaType)
+			found += f
+			imported += i
+			skipped += s
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if !isMediaExt(ext) {
+			continue
+		}
+		found++
+		if m.isAlreadyImported(fullPath) {
+			skipped++
+			continue
+		}
+		if m.registerLibraryFile(fullPath, entry.Name(), mediaType) {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+	return
+}
+
+func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool {
+	parsed := parseFileName(fileName)
+	if parsed.Title == "" {
+		return false
+	}
+	switch {
+	case parsed.MediaType == mediaType:
+		// ok
+	case parsed.MediaType == "other" && (mediaType == "movie" || mediaType == "tv"):
+		parsed.MediaType = mediaType
+	default:
+		return false
+	}
+
+	quality := parsed.Quality
+	if q := m.probeQuality(fullPath); q != "" {
+		quality = q
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
+	m.mu.Lock()
+	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
+		importID, fullPath, fullPath, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
+	)
+	m.mu.Unlock()
+
+	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
+		"original_path":    fullPath,
+		"destination_path": fullPath,
+		"storage_key":      fullPath,
+		"media_type":       parsed.MediaType,
+		"title":            parsed.Title,
+		"year":             parsed.Year,
+		"season_number":    parsed.Season,
+		"episode_number":   parsed.Episode,
+		"episode_numbers":  episodeNumbersInt32(parsed.Episodes, parsed.Episode),
+		"absolute_number":  parsed.AbsoluteNumber,
+		"air_date":         parsed.AirDate,
+		"season_pack":      parsed.SeasonPack,
+		"quality":          quality,
+		"tmdb_id":          parsed.TMDBID,
+	})
+	return true
 }
 
 func (m *Module) GetStats(ctx context.Context, req *scannerv1.GetStatsRequest) (*scannerv1.GetStatsResponse, error) {
@@ -848,6 +1551,69 @@ func (m *Module) ListImported(ctx context.Context, req *scannerv1.ListImportedRe
 		Files: files, Total: int32(total),
 		Page: int32(page), PageSize: int32(pageSize),
 	}, nil
+}
+
+func normalizeImportMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "hardlink", "link":
+		return "hardlink"
+	case "copy":
+		return "copy"
+	case "move":
+		return "move"
+	default:
+		return "hardlink"
+	}
+}
+
+func placeFile(src, dst, mode string) error {
+	mode = normalizeImportMode(mode)
+	switch mode {
+	case "hardlink":
+		if err := os.Link(src, dst); err == nil {
+			return nil
+		}
+		return copyFile(src, dst)
+	case "copy":
+		return copyFile(src, dst)
+	default:
+		if err := os.Rename(src, dst); err == nil {
+			return nil
+		}
+		if err := copyFile(src, dst); err != nil {
+			return err
+		}
+		return os.Remove(src)
+	}
+}
+
+var (
+	reSampleName = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(sample|samples|trailer)(?:[.\-_ ]|$)`)
+	reSampleBase = regexp.MustCompile(`(?i)^(?:sample|samples|trailer)(?:[.\-_ ].*)?\.\w+$`)
+	reEdition    = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(directors?[.\-_ ]?cut|extended(?:[.\-_ ]?cut)?|theatrical|unrated|remastered|criterion|imax)(?:[.\-_ ]|$)`)
+	reGroup      = regexp.MustCompile(`(?i)-([A-Za-z0-9]+)(?:\.\w+)?$`)
+)
+
+func (m *Module) isSampleFile(name string, size int64) (reason string, reject bool) {
+	if m.minVideoBytes > 0 && size > 0 && size < m.minVideoBytes {
+		return "below minimum video size", true
+	}
+	sampleName := reSampleName.MatchString(name) || reSampleBase.MatchString(name)
+	if sampleName && (size == 0 || size < m.sampleMaxBytes) {
+		return "sample/trailer filename", true
+	}
+	return "", false
+}
+
+func parseEditionAndGroup(name string) (edition, group string) {
+	if m := reEdition.FindStringSubmatch(name); len(m) >= 2 {
+		edition = strings.TrimSpace(strings.ReplaceAll(m[1], ".", " "))
+		edition = strings.Join(strings.Fields(edition), " ")
+	}
+	if m := reGroup.FindStringSubmatch(name); len(m) >= 2 {
+		group = m[1]
+	}
+	return edition, group
 }
 
 var _ contracts.Module = (*Module)(nil)
