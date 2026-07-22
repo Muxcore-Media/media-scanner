@@ -482,6 +482,18 @@ func TestParseEditionAndGroup(t *testing.T) {
 	}
 }
 
+func TestParseProperToken(t *testing.T) {
+	if got := parseProperToken("Show.S01E01.PROPER.1080p.mkv"); got != "Proper" {
+		t.Errorf("want Proper, got %q", got)
+	}
+	if got := parseProperToken("Show.S01E01.REPACK.1080p.mkv"); got != "Repack" {
+		t.Errorf("want Repack, got %q", got)
+	}
+	if got := parseProperToken("Show.S01E01.1080p.mkv"); got != "" {
+		t.Errorf("want empty, got %q", got)
+	}
+}
+
 func TestScanLibraryRootsInPlace(t *testing.T) {
 	tmp := t.TempDir()
 	lib := filepath.Join(tmp, "library")

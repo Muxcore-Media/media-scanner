@@ -10,6 +10,9 @@ require (
 	github.com/Muxcore-Media/media-ffprobe v0.1.0
 	github.com/Muxcore-Media/media-rename v0.1.0
 	github.com/Muxcore-Media/media-subtitles v0.1.0
+	github.com/Muxcore-Media/media-tvshows v0.1.0
+	github.com/fsnotify/fsnotify v1.10.1
+	github.com/nwaples/rardecode/v2 v2.2.5
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.52.0
@@ -43,3 +46,5 @@ replace github.com/Muxcore-Media/media-rename => ../media-rename
 replace github.com/Muxcore-Media/media-ffprobe => ../media-ffprobe
 
 replace github.com/Muxcore-Media/media-subtitles => ../media-subtitles
+
+replace github.com/Muxcore-Media/media-tvshows => ../media-tvshows
