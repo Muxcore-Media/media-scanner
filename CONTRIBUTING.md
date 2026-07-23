@@ -10,9 +10,9 @@
 
 ## Pull Request Process
 
-1. Branch from `main`
+1. Branch from `master`
 2. CI must pass (lint + test + build)
-3. Squash-merge to `main`
+3. Squash-merge to `master`
 
 ## Code Style
 
