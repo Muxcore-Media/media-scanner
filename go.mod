@@ -12,7 +12,7 @@ require (
 	github.com/Muxcore-Media/media-subtitles v0.1.0
 	github.com/Muxcore-Media/media-tvshows v0.1.0
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/nwaples/rardecode/v2 v2.2.5
+	github.com/nwaples/rardecode/v2 v2.3.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.54.0
