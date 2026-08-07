@@ -10,11 +10,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          path: core
+          repository: Muxcore-Media/core
+      - uses: actions/checkout@v7
+        with:
+          path: media-ffprobe
+          repository: Muxcore-Media/media-ffprobe
+      - uses: actions/checkout@v7
+        with:
+          path: media-rename
+          repository: Muxcore-Media/media-rename
+      - uses: actions/checkout@v7
+        with:
+          path: media-root-folders
+          repository: Muxcore-Media/media-root-folders
+      - uses: actions/checkout@v7
+        with:
+          path: media-subtitles
+          repository: Muxcore-Media/media-subtitles
+      - uses: actions/checkout@v7
+        with:
+          path: media-tvshows
+          repository: Muxcore-Media/media-tvshows
+      - uses: actions/checkout@v7
+        with:
+          path: media-scanner
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
-      - run: go build -o media-scanner ./cmd/module
+      - working-directory: ./media-scanner
+        run: go build -o media-scanner ./cmd/module
       - name: Create Release
         uses: softprops/action-github-release@v2
         with:
-          files: media-scanner
+          files: media-scanner/media-scanner
