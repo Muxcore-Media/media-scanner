@@ -254,10 +254,11 @@ func (m *Module) Init(ctx context.Context) error {
 	// Auto-register default watch directory if configured.
 	if m.defaultWatchDir != "" {
 		watchID := fmt.Sprintf("auto_watch_%d", time.Now().UnixNano())
+		libPath := m.libraryRoot
 		m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
-			watchID, m.defaultWatchDir, "both", "", time.Now().UTC().Format(time.RFC3339),
+			watchID, m.defaultWatchDir, "both", libPath, time.Now().UTC().Format(time.RFC3339),
 		)
-		slog.Info("auto-registered watch dir", "path", m.defaultWatchDir)
+		slog.Info("auto-registered watch dir", "path", m.defaultWatchDir, "library", libPath)
 	}
 
 	lis, err := net.Listen("tcp", m.grpcAddr)
@@ -540,6 +541,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		return false
 	}
 
+	usedStorage := false
 	if m.mc != nil {
 		f, err := os.Open(fullPath)
 		if err != nil {
@@ -548,14 +550,17 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		}
 		if err := m.mc.Storage.Put(context.Background(), storageKey, f); err != nil {
 			f.Close()
-			slog.Error("storage put failed", "key", storageKey, "error", err)
-			return false
+			slog.Warn("storage put failed; falling back to local import",
+				"key", storageKey, "error", err, "mode", m.importMode)
+		} else {
+			f.Close()
+			usedStorage = true
+			if err := os.Remove(fullPath); err != nil {
+				slog.Debug("remove source after storage put", "src", fullPath, "error", err)
+			}
 		}
-		f.Close()
-		if err := os.Remove(fullPath); err != nil {
-			slog.Debug("remove source after storage put", "src", fullPath, "error", err)
-		}
-	} else {
+	}
+	if !usedStorage {
 		destDir := filepath.Dir(destPath)
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			slog.Error("create destination directory", "path", destDir, "error", err)
@@ -565,6 +570,11 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 			slog.Error("place file", "src", fullPath, "dst", destPath, "mode", m.importMode, "error", err)
 			return false
 		}
+	}
+
+	recordedDest := storageKey
+	if !usedStorage {
+		recordedDest = destPath
 	}
 
 	quality := parsed.Quality
@@ -590,15 +600,15 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 
 	m.mu.Lock()
 	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
-		importID, fullPath, storageKey, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
+		importID, fullPath, recordedDest, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
 	)
 	m.mu.Unlock()
 
-	slog.Info("imported file", "src", fileName, "key", storageKey, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
+	slog.Info("imported file", "src", fileName, "key", recordedDest, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
 
 	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
 		"original_path":    fullPath,
-		"destination_path": storageKey,
+		"destination_path": recordedDest,
 		"storage_key":      storageKey,
 		"media_type":       parsed.MediaType,
 		"title":            parsed.Title,
