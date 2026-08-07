@@ -17,26 +17,32 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-ffprobe
           repository: Muxcore-Media/media-ffprobe
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-rename
           repository: Muxcore-Media/media-rename
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-root-folders
           repository: Muxcore-Media/media-root-folders
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-subtitles
           repository: Muxcore-Media/media-subtitles
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-tvshows
           repository: Muxcore-Media/media-tvshows
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-scanner
@@ -57,26 +63,32 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-ffprobe
           repository: Muxcore-Media/media-ffprobe
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-rename
           repository: Muxcore-Media/media-rename
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-root-folders
           repository: Muxcore-Media/media-root-folders
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-subtitles
           repository: Muxcore-Media/media-subtitles
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-tvshows
           repository: Muxcore-Media/media-tvshows
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-scanner
@@ -94,26 +106,32 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-ffprobe
           repository: Muxcore-Media/media-ffprobe
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-rename
           repository: Muxcore-Media/media-rename
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-root-folders
           repository: Muxcore-Media/media-root-folders
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-subtitles
           repository: Muxcore-Media/media-subtitles
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-tvshows
           repository: Muxcore-Media/media-tvshows
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-scanner
@@ -135,26 +153,32 @@ jobs:
         with:
           path: core
           repository: Muxcore-Media/core
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-ffprobe
           repository: Muxcore-Media/media-ffprobe
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-rename
           repository: Muxcore-Media/media-rename
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-root-folders
           repository: Muxcore-Media/media-root-folders
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-subtitles
           repository: Muxcore-Media/media-subtitles
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-tvshows
           repository: Muxcore-Media/media-tvshows
+          token: ${{ secrets.MUXCORE_CI_TOKEN }}
       - uses: actions/checkout@v7
         with:
           path: media-scanner
