@@ -97,26 +97,14 @@ func (m *Module) watchLoop(ctx context.Context) {
 		time.Sleep(m.initialDelay)
 	}
 	m.scheduleScan()
-
-	var tickC <-chan time.Time
-	if m.safetyRescan > 0 {
-		ticker := time.NewTicker(m.safetyRescan)
-		defer ticker.Stop()
-		tickC = ticker.C
-	}
+	go m.safetyLoop(ctx)
 
 	m.mu.RLock()
 	w := m.watcher
 	m.mu.RUnlock()
 	if w == nil {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tickC:
-				m.scheduleScan()
-			}
-		}
+		<-ctx.Done()
+		return
 	}
 
 	for {
@@ -133,7 +121,27 @@ func (m *Module) watchLoop(ctx context.Context) {
 				return
 			}
 			slog.Warn("fsnotify error", "error", err)
-		case <-tickC:
+		}
+	}
+}
+
+func (m *Module) safetyLoop(ctx context.Context) {
+	for {
+		d := m.getSafetyRescan()
+		if d <= 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Minute):
+				continue
+			}
+		}
+		timer := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 			m.scheduleScan()
 		}
 	}
