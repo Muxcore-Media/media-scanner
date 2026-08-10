@@ -1,0 +1,126 @@
+package internal
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Muxcore-Media/core/pkg/contracts"
+)
+
+func (m *Module) Settings() []contracts.SettingDef {
+	return m.settingsDefs()
+}
+
+func (m *Module) UpdateSetting(key, value string) error {
+	return m.updateSetting(key, value)
+}
+
+func (m *Module) settingsDefs() []contracts.SettingDef {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return []contracts.SettingDef{
+		{
+			Key:         "import_mode",
+			Label:       "Import Mode",
+			Type:        contracts.SettingTypeString,
+			Value:       m.importMode,
+			Description: "hardlink | copy | move (SCANNER_IMPORT_MODE)",
+			Group:       "Import",
+		},
+		{
+			Key:         "library_root",
+			Label:       "Library Root",
+			Type:        contracts.SettingTypeString,
+			Value:       m.libraryRoot,
+			Description: "Default library destination root (SCANNER_LIBRARY_ROOT)",
+			Group:       "Paths",
+		},
+		{
+			Key:         "sample_max_bytes",
+			Label:       "Sample Max Bytes",
+			Type:        contracts.SettingTypeString,
+			Value:       strconv.FormatInt(m.sampleMaxBytes, 10),
+			Description: "Skip files matching sample naming under this size (SCANNER_SAMPLE_MAX_BYTES)",
+			Group:       "Filters",
+		},
+		{
+			Key:         "min_video_bytes",
+			Label:       "Min Video Bytes",
+			Type:        contracts.SettingTypeString,
+			Value:       strconv.FormatInt(m.minVideoBytes, 10),
+			Description: "Skip videos smaller than this (0 disables; SCANNER_MIN_VIDEO_BYTES)",
+			Group:       "Filters",
+		},
+		{
+			Key:         "safety_rescan",
+			Label:       "Safety Rescan Interval",
+			Type:        contracts.SettingTypeString,
+			Value:       m.safetyRescan.String(),
+			Description: "Periodic full rescan (0 disables; Go duration; SCANNER_SAFETY_RESCAN)",
+			Group:       "Watcher",
+		},
+	}
+}
+
+func (m *Module) updateSetting(key, value string) error {
+	value = strings.TrimSpace(value)
+	switch key {
+	case "import_mode", "SCANNER_IMPORT_MODE":
+		mode := normalizeImportMode(value)
+		m.mu.Lock()
+		m.importMode = mode
+		m.mu.Unlock()
+		return nil
+	case "library_root", "SCANNER_LIBRARY_ROOT":
+		if value == "" {
+			return fmt.Errorf("library_root must not be empty")
+		}
+		m.mu.Lock()
+		m.libraryRoot = value
+		m.mu.Unlock()
+		return nil
+	case "sample_max_bytes", "SCANNER_SAMPLE_MAX_BYTES":
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid sample_max_bytes %q", value)
+		}
+		m.mu.Lock()
+		m.sampleMaxBytes = n
+		m.mu.Unlock()
+		return nil
+	case "min_video_bytes", "SCANNER_MIN_VIDEO_BYTES":
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid min_video_bytes %q", value)
+		}
+		m.mu.Lock()
+		m.minVideoBytes = n
+		m.mu.Unlock()
+		return nil
+	case "safety_rescan", "SCANNER_SAFETY_RESCAN":
+		var d time.Duration
+		if value == "0" {
+			d = 0
+		} else {
+			parsed, err := time.ParseDuration(value)
+			if err != nil || parsed < 0 {
+				return fmt.Errorf("invalid safety_rescan %q (use Go duration or 0)", value)
+			}
+			d = parsed
+		}
+		m.mu.Lock()
+		m.safetyRescan = d
+		m.mu.Unlock()
+		return nil
+	default:
+		return fmt.Errorf("unknown setting %q", key)
+	}
+}
+
+func (m *Module) getSafetyRescan() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.safetyRescan
+}

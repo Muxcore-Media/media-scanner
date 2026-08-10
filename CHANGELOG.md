@@ -1,6 +1,16 @@
 # Changelog
 
 
+## [0.1.8] — 2026-08-10
+
+### Added
+- SettingsProvider mesh (`RegisterSettings`) for import mode, library root, size filters, and safety rescan.
+
+### Changed
+- Safety rescan loop re-reads interval so live setting updates apply without restart.
+- Pin `core/sdk/go/module` to **v0.5.2**.
+
+
 ## [0.1.7] — 2026-08-10
 
 ### Fixed
