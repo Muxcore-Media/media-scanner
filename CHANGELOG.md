@@ -1,5 +1,11 @@
 # Changelog
 
+
+## [0.1.4] — 2026-08-10
+
+### Fixed
+- Module `Info().Version` aligned to **0.1.4** (was 0.1.0).
+
 ## Unreleased
 
 - Replace 60s poll with fsnotify watching and a configurable safety rescan (`SCANNER_SAFETY_RESCAN`, default 15m)
