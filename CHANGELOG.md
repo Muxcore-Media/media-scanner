@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [0.1.7] — 2026-08-10
+
+### Fixed
+- Align Info()/muxcore.json version to **0.1.7** (v0.1.6 tag still advertised 0.1.5).
+
+
 ## [0.1.6] — 2026-08-10
 
 ### Fixed
