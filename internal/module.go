@@ -572,9 +572,9 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		}
 	}
 
-	recordedDest := storageKey
-	if !usedStorage {
-		recordedDest = destPath
+	recordedDest := destPath
+	if recordedDest == "" {
+		recordedDest = storageKey
 	}
 
 	quality := parsed.Quality
@@ -604,7 +604,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 	)
 	m.mu.Unlock()
 
-	slog.Info("imported file", "src", fileName, "key", recordedDest, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
+	slog.Info("imported file", "src", fileName, "dest", recordedDest, "storage_key", storageKey, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
 
 	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
 		"original_path":    fullPath,
