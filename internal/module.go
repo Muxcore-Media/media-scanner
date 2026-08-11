@@ -601,9 +601,11 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
 
 	m.mu.Lock()
-	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
-		importID, fullPath, recordedDest, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
-	)
+	if m.db != nil {
+		m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
+			importID, fullPath, recordedDest, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
+		)
+	}
 	m.mu.Unlock()
 
 	slog.Info("imported file", "src", fileName, "dest", recordedDest, "storage_key", storageKey, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
