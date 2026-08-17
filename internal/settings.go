@@ -34,7 +34,15 @@ func (m *Module) settingsDefs() []contracts.SettingDef {
 			Label:       "Library Root",
 			Type:        contracts.SettingTypeString,
 			Value:       m.libraryRoot,
-			Description: "Default library destination root (SCANNER_LIBRARY_ROOT)",
+			Description: "Movie library root or parent that contains Movies/movies (SCANNER_LIBRARY_ROOT)",
+			Group:       "Paths",
+		},
+		{
+			Key:         "tv_library_root",
+			Label:       "TV Library Root",
+			Type:        contracts.SettingTypeString,
+			Value:       m.tvLibraryRoot,
+			Description: "TV library root or parent that contains TV/shows (SCANNER_TV_LIBRARY_ROOT)",
 			Group:       "Paths",
 		},
 		{
@@ -79,6 +87,11 @@ func (m *Module) updateSetting(key, value string) error {
 		}
 		m.mu.Lock()
 		m.libraryRoot = value
+		m.mu.Unlock()
+		return nil
+	case "tv_library_root", "SCANNER_TV_LIBRARY_ROOT":
+		m.mu.Lock()
+		m.tvLibraryRoot = value
 		m.mu.Unlock()
 		return nil
 	case "sample_max_bytes", "SCANNER_SAMPLE_MAX_BYTES":

@@ -43,6 +43,7 @@ type Module struct {
 	dbPath          string
 	grpcAddr        string
 	libraryRoot     string
+	tvLibraryRoot   string
 	defaultWatchDir string
 	importMode      string
 	sampleMaxBytes  int64
@@ -66,6 +67,7 @@ type Config struct {
 	DBPath           string
 	GRPCAddr         string
 	LibraryRoot      string
+	TVLibraryRoot    string
 	DefaultWatchDir  string
 	ImportMode       string
 	SampleMaxBytes   int64
@@ -105,6 +107,9 @@ func NewModule(cfg Config) *Module {
 	}
 	if v := os.Getenv("SCANNER_LIBRARY_ROOT"); v != "" {
 		cfg.LibraryRoot = v
+	}
+	if v := os.Getenv("SCANNER_TV_LIBRARY_ROOT"); v != "" {
+		cfg.TVLibraryRoot = v
 	}
 	if v := os.Getenv("SCANNER_DEFAULT_WATCH_DIR"); v != "" {
 		cfg.DefaultWatchDir = v
@@ -154,6 +159,7 @@ func NewModule(cfg Config) *Module {
 		dbPath:          cfg.DBPath,
 		grpcAddr:        cfg.GRPCAddr,
 		libraryRoot:     cfg.LibraryRoot,
+		tvLibraryRoot:   cfg.TVLibraryRoot,
 		defaultWatchDir: cfg.DefaultWatchDir,
 		importMode:      normalizeImportMode(cfg.ImportMode),
 		sampleMaxBytes:  cfg.SampleMaxBytes,
@@ -168,7 +174,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:      "0.1.9",
+		Version:        "0.1.9",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -601,11 +607,9 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
 
 	m.mu.Lock()
-	if m.db != nil {
-		m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
-			importID, fullPath, recordedDest, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
-		)
-	}
+	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
+		importID, fullPath, recordedDest, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
+	)
 	m.mu.Unlock()
 
 	slog.Info("imported file", "src", fileName, "dest", recordedDest, "storage_key", storageKey, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
@@ -1089,7 +1093,11 @@ func (m *Module) buildDestPath(p parsedFile, libPath string) string {
 // ── Filename Parsing ───────────────────────────────────────────
 
 var (
-	reMovie = regexp.MustCompile(`(?i)^(.+?)[.\s-_]+(\d{4})(?:[.\s-_]+(.+))?\.\w+$`)
+	reMovie      = regexp.MustCompile(`(?i)^(.+?)[.\s-_]+(\d{4})(?:[.\s-_]+(.+))?\.\w+$`)
+	reMovieParen = regexp.MustCompile(`(?i)^(.+?)\s*\((\d{4})\)`)
+	reTMDBID     = regexp.MustCompile(`(?i)\[tmdbid-(\d+)\]`)
+	reTitleYear  = regexp.MustCompile(`(?i)\s*[\(\[]((?:19|20)\d{2})[\)\]]\s*$`)
+	reSeasonDir  = regexp.MustCompile(`(?i)^(?:season\s*\d{1,2}|specials)$`)
 
 	reTVMultiEpRange  = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})-E?(\d{1,3})(?:[.\s-_]|$|\.)`)
 	reTVMultiEpChain  = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})((?:E\d{1,3}){1,20})(?:[.\s-_]|$|\.)`)
@@ -1169,7 +1177,7 @@ func parseFileName(fileName string) parsedFile {
 		result.Episode, _ = strconv.Atoi(m[2])
 		result.Episodes = []int{result.Episode}
 		result.Title = extractTVTitle(fileName, m[0])
-	} else if m := reTVSeasonEpLong.FindStringSubmatch(fileName); len(m) >= 3 {
+	} else if m := reTVSeasonEpLong.FindStringSubmatch(fileName); len(m) >= 3 && !isVideoCodecNxN(m[2]) {
 		result.MediaType = "tv"
 		result.Season, _ = strconv.Atoi(m[1])
 		result.Episode, _ = strconv.Atoi(m[2])
@@ -1196,6 +1204,10 @@ func parseFileName(fileName string) parsedFile {
 		result.MediaType = "tv"
 		result.AbsoluteNumber = abs
 		result.Title = extractTVTitleAbsolute(fileName)
+	} else if m := reMovieParen.FindStringSubmatch(fileName); len(m) >= 3 {
+		result.MediaType = "movie"
+		result.Title = cleanTitle(m[1])
+		result.Year, _ = strconv.Atoi(m[2])
 	} else if m := reMovie.FindStringSubmatch(fileName); len(m) >= 3 {
 		result.MediaType = "movie"
 		result.Title = cleanTitle(m[1])
@@ -1208,8 +1220,48 @@ func parseFileName(fileName string) parsedFile {
 		result.Title = cleanTitle(trimExt(fileName))
 	}
 
+	if tm := reTMDBID.FindStringSubmatch(fileName); len(tm) >= 2 {
+		result.TMDBID, _ = strconv.Atoi(tm[1])
+	}
+
+	if result.MediaType == "tv" {
+		result.Title, result.Year = stripTrailingYear(result.Title, result.Year)
+	}
+
 	result.Quality = extractQuality(fileName)
 	return result
+}
+
+func enrichParsedFromPath(parsed *parsedFile, fullPath string) {
+	if parsed == nil {
+		return
+	}
+	if tm := reTMDBID.FindStringSubmatch(fullPath); len(tm) >= 2 && parsed.TMDBID == 0 {
+		parsed.TMDBID, _ = strconv.Atoi(tm[1])
+	}
+	if parsed.Title != "" && parsed.Year > 0 && parsed.MediaType != "other" {
+		return
+	}
+	parent := filepath.Base(filepath.Dir(fullPath))
+	if isSeasonDirName(parent) {
+		parent = filepath.Base(filepath.Dir(filepath.Dir(fullPath)))
+	}
+	if parent == "" || parent == "." || skipLibrarySubdir(parent) {
+		return
+	}
+	fromDir := parseFileName(parent + ".mkv")
+	if parsed.Title == "" {
+		parsed.Title = fromDir.Title
+	}
+	if parsed.Year == 0 {
+		parsed.Year = fromDir.Year
+	}
+	if parsed.TMDBID == 0 {
+		parsed.TMDBID = fromDir.TMDBID
+	}
+	if parsed.MediaType == "other" && fromDir.MediaType != "" {
+		parsed.MediaType = fromDir.MediaType
+	}
 }
 
 var reTVEpToken = regexp.MustCompile(`(?i)E(\d{1,3})`)
@@ -1223,6 +1275,16 @@ func episodeRange(start, end int) []int {
 		out = append(out, i)
 	}
 	return out
+}
+
+// isVideoCodecNxN reports whether an NxN capture is a scene codec (DDP5.1.x265), not 1x265.
+func isVideoCodecNxN(episode string) bool {
+	switch episode {
+	case "264", "265", "266":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseAbsoluteNumber(fileName string) (int, bool) {
@@ -1288,6 +1350,27 @@ func episodeNumbersInt32(episodes []int, fallback int) []int32 {
 		out[i] = int32(e)
 	}
 	return out
+}
+
+func stripTrailingYear(title string, year int) (string, int) {
+	title = strings.TrimSpace(title)
+	m := reTitleYear.FindStringSubmatch(title)
+	if len(m) < 2 {
+		return title, year
+	}
+	y, _ := strconv.Atoi(m[1])
+	if y < 1900 {
+		return title, year
+	}
+	title = strings.TrimSpace(reTitleYear.ReplaceAllString(title, ""))
+	if year == 0 {
+		year = y
+	}
+	return title, year
+}
+
+func isSeasonDirName(name string) bool {
+	return reSeasonDir.MatchString(strings.TrimSpace(name))
 }
 
 func extractTVTitle(fileName, match string) string {
@@ -1437,34 +1520,151 @@ func deepestWatchDir(dirs []watchDirEntry, path string) (watchDirEntry, bool) {
 }
 
 func (m *Module) ScanLibraryRoots(ctx context.Context, req *scannerv1.ScanLibraryRootsRequest) (*scannerv1.ScanLibraryRootsResponse, error) {
-	roots := m.collectLibraryRoots()
-	if roots == nil {
+	targets := m.libraryScanTargets()
+	if targets == nil {
 		return nil, fmt.Errorf("not initialized")
 	}
 	var totalFound, totalImported, totalSkipped int
-	for _, root := range roots {
-		for _, folder := range []struct {
-			name      string
-			mediaType string
-		}{
-			{"Movies", "movie"},
-			{"TV", "tv"},
-		} {
-			dir := filepath.Join(root, folder.name)
-			if _, err := os.Stat(dir); err != nil {
-				continue
-			}
-			found, imported, skipped := m.scanLibraryDirectory(dir, folder.mediaType)
-			totalFound += found
-			totalImported += imported
-			totalSkipped += skipped
-		}
+	for _, t := range targets {
+		found, imported, skipped := m.scanLibraryDirectory(t.dir, t.mediaType)
+		totalFound += found
+		totalImported += imported
+		totalSkipped += skipped
 	}
 	return &scannerv1.ScanLibraryRootsResponse{
 		FilesFound:    int32(totalFound),
 		FilesImported: int32(totalImported),
 		FilesSkipped:  int32(totalSkipped),
 	}, nil
+}
+
+type libraryScanTarget struct {
+	dir       string
+	mediaType string
+}
+
+func (m *Module) libraryScanTargets() []libraryScanTarget {
+	m.mu.RLock()
+	dbReady := m.db != nil
+	tvRoot := m.tvLibraryRoot
+	m.mu.RUnlock()
+	if !dbReady {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []libraryScanTarget
+	add := func(dir, mediaType string) {
+		dir = filepath.Clean(dir)
+		if dir == "" || dir == "." {
+			return
+		}
+		key := mediaType + "\x00" + dir
+		if _, ok := seen[key]; ok {
+			return
+		}
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, libraryScanTarget{dir: dir, mediaType: mediaType})
+	}
+	for _, root := range m.collectLibraryRoots() {
+		for _, dir := range resolveLibraryDirs(root, "movie") {
+			add(dir, "movie")
+		}
+		for _, dir := range resolveLibraryDirs(root, "tv") {
+			add(dir, "tv")
+		}
+	}
+	if tvRoot != "" {
+		for _, dir := range resolveLibraryDirs(tvRoot, "tv") {
+			add(dir, "tv")
+		}
+	}
+	if out == nil {
+		out = []libraryScanTarget{}
+	}
+	return out
+}
+
+func resolveLibraryDirs(root, mediaType string) []string {
+	root = filepath.Clean(root)
+	if root == "" || root == "." {
+		return nil
+	}
+	names := movieLibraryDirNames
+	if mediaType == "tv" {
+		names = tvLibraryDirNames
+	}
+	var found []string
+	for _, name := range names {
+		p := filepath.Join(root, name)
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			found = append(found, p)
+		}
+	}
+	if len(found) > 0 {
+		return found
+	}
+	base := strings.ToLower(filepath.Base(root))
+	for _, name := range names {
+		if base == strings.ToLower(name) {
+			return []string{root}
+		}
+	}
+	other := tvLibraryDirNames
+	if mediaType == "tv" {
+		other = movieLibraryDirNames
+	}
+	for _, name := range other {
+		if base == strings.ToLower(name) {
+			return nil
+		}
+	}
+	if hasMediaFiles(root, 2) {
+		return []string{root}
+	}
+	return nil
+}
+
+var (
+	movieLibraryDirNames = []string{"Movies", "movies", "movie"}
+	tvLibraryDirNames    = []string{"TV", "tv", "shows", "Shows"}
+)
+
+func hasMediaFiles(dir string, depth int) bool {
+	if depth < 0 {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if skipLibrarySubdir(e.Name()) {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if e.IsDir() {
+			if hasMediaFiles(p, depth-1) {
+				return true
+			}
+			continue
+		}
+		if isMediaExt(strings.ToLower(filepath.Ext(e.Name()))) {
+			return true
+		}
+	}
+	return false
+}
+
+func skipLibrarySubdir(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "extras", "extra", "samples", "sample", "featurettes", "trailers", "other":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Module) collectLibraryRoots() []string {
@@ -1515,6 +1715,9 @@ func (m *Module) scanLibraryDirectory(dir, mediaType string) (found, imported, s
 		return 0, 0, 0
 	}
 	for _, entry := range entries {
+		if skipLibrarySubdir(entry.Name()) {
+			continue
+		}
 		fullPath := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
 			f, i, s := m.scanLibraryDirectory(fullPath, mediaType)
@@ -1543,6 +1746,7 @@ func (m *Module) scanLibraryDirectory(dir, mediaType string) (found, imported, s
 
 func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool {
 	parsed := parseFileName(fileName)
+	enrichParsedFromPath(&parsed, fullPath)
 	if parsed.Title == "" {
 		return false
 	}

@@ -593,3 +593,95 @@ func TestScanLibraryRootsInPlace(t *testing.T) {
 		t.Fatalf("second scan should skip: %+v", resp2)
 	}
 }
+
+func TestScanLibraryRootsLeafMoviesDir(t *testing.T) {
+	tmp := t.TempDir()
+	movies := filepath.Join(tmp, "movies")
+	movieDir := filepath.Join(movies, "Dune (2021)")
+	if err := os.MkdirAll(movieDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	moviePath := filepath.Join(movieDir, "Dune (2021) [Unknown].avi")
+	if err := os.WriteFile(moviePath, []byte("video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	extras := filepath.Join(movies, "Fight Club (1999)", "extras")
+	if err := os.MkdirAll(extras, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extras, "Fight Club audio track 2 ch.mp4"), []byte("extra"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	shows := filepath.Join(tmp, "shows")
+	epDir := filepath.Join(shows, "When Calls the Heart (2014)", "Season 01")
+	if err := os.MkdirAll(epDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	epPath := filepath.Join(epDir, "When Calls the Heart (2014) - S01E01 - Lost and Found.mkv")
+	if err := os.WriteFile(epPath, []byte("video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewModule(Config{
+		DBPath:        filepath.Join(tmp, "scanner.db"),
+		GRPCAddr:      ":0",
+		LibraryRoot:   movies,
+		TVLibraryRoot: shows,
+		MinVideoBytes: -1,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Stop(ctx) })
+
+	resp, err := m.ScanLibraryRoots(ctx, &scannerv1.ScanLibraryRootsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesImported < 2 {
+		t.Fatalf("expected movie+episode import, got %+v", resp)
+	}
+	var title string
+	var year, season, episode int
+	m.mu.RLock()
+	err = m.db.QueryRow(`SELECT title, year, season_number, episode_number FROM imported_files WHERE media_type = 'tv' LIMIT 1`).Scan(&title, &year, &season, &episode)
+	m.mu.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "When Calls the Heart" || year != 2014 || season != 1 || episode != 1 {
+		t.Fatalf("tv import title=%q year=%d S%dE%d", title, year, season, episode)
+	}
+}
+
+func TestParseFileNameParenYearAndTmdb(t *testing.T) {
+	p := parseFileName("The Princess Diaries (2001) [tmdbid-9880] - WEBDL.mkv")
+	if p.MediaType != "movie" || p.Title != "The Princess Diaries" || p.Year != 2001 || p.TMDBID != 9880 {
+		t.Fatalf("got %+v", p)
+	}
+	p = parseFileName("Dune (2021) [Unknown].avi")
+	if p.MediaType != "movie" || p.Title != "Dune" || p.Year != 2021 {
+		t.Fatalf("got %+v", p)
+	}
+	p = parseFileName("Spider-Man.2.2004.1080p.BluRay.DDP5.1.x265.10bit-GalaxyRG265.mkv")
+	if p.MediaType != "movie" || p.Year != 2004 {
+		t.Fatalf("x265 must not parse as 1x265 episode, got %+v", p)
+	}
+	p = parseFileName("Spider-Man- Brand New Day 2026.1080p.HQ Pre.Multi.AAC 2.0.x264.mkv")
+	if p.MediaType != "movie" || p.Year != 2026 {
+		t.Fatalf("x264 must not parse as 0x264 episode, got %+v", p)
+	}
+}
+
+func TestParseFileNameTVParenYear(t *testing.T) {
+	p := parseFileName("When Calls the Heart (2014) - S01E01 - Lost and Found.mkv")
+	if p.MediaType != "tv" || p.Title != "When Calls the Heart" || p.Year != 2014 || p.Season != 1 || p.Episode != 1 {
+		t.Fatalf("got %+v", p)
+	}
+	p = parseFileName("Breaking Bad (2008) - S02E09 - 4 Days Out [HDTV].avi")
+	if p.MediaType != "tv" || p.Title != "Breaking Bad" || p.Year != 2008 || p.Season != 2 || p.Episode != 9 {
+		t.Fatalf("got %+v", p)
+	}
+}
