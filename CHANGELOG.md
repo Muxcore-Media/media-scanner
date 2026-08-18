@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.14] — 2026-08-18
+
+### Fixed
+- Skip mesh `storage.Put` when a local library destination path is known. Put was EOF'ing on every vault import (`send: EOF`) and then falling back to copy anyway.
+
 ## [0.1.13] — 2026-08-18
 
 ### Fixed
