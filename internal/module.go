@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.17",
+		Version:        "0.1.18",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -557,8 +557,12 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 			parsed.MediaType = "movie"
 		}
 	}
-	if parsed.Title == "" {
-		slog.Debug("unable to parse filename", "file", fileName)
+	if isJunkImportTitle(parsed.Title) {
+		slog.Info("skipping junk title", "file", fileName, "title", parsed.Title)
+		return false
+	}
+	if parsed.Title == "" || parsed.MediaType == "other" {
+		slog.Info("skipping unrecognized media", "file", fileName, "title", parsed.Title)
 		return false
 	}
 
@@ -1174,6 +1178,9 @@ func (m *Module) buildDestPath(p parsedFile, libPath string) string {
 	root := m.destRootFor(p, libPath)
 	folder := libraryKindPrefix(root, p.MediaType)
 	safeTitle := sanitizeName(p.Title)
+	if p.MediaType == "tv" {
+		safeTitle = existingTitleDir(root, folder, p.Title)
+	}
 	ext := filepath.Ext(p.FileName)
 
 	join := func(elem ...string) string {
@@ -1340,6 +1347,11 @@ func parseFileName(fileName string) parsedFile {
 		result.Episode = n
 		result.Episodes = []int{n}
 		result.Title = cleanTitle(m[2])
+	} else if n, ok := parseBareEpisodeNumber(fileName); ok {
+		result.MediaType = "tv"
+		result.Episode = n
+		result.Episodes = []int{n}
+		result.Title = ""
 	} else if m := reMovieParen.FindStringSubmatch(fileName); len(m) >= 3 {
 		result.MediaType = "movie"
 		result.Title = cleanTitle(m[1])
@@ -1395,6 +1407,19 @@ func enrichParsedFromPath(parsed *parsedFile, fullPath string) {
 		return
 	}
 	fromDir := parseFileName(parent + ".mkv")
+	if n, ok := parseBareEpisodeNumber(parsed.FileName); ok && fromDir.Title != "" && !isJunkImportTitle(fromDir.Title) {
+		parsed.Title = fromDir.Title
+		parsed.MediaType = "tv"
+		parsed.Episode = n
+		parsed.Episodes = []int{n}
+		if parsed.Season == 0 && fromDir.Season > 0 {
+			parsed.Season = fromDir.Season
+		}
+		if parsed.Year == 0 {
+			parsed.Year = fromDir.Year
+		}
+		return
+	}
 	if looksLikeBareEpisodeFile(parsed.FileName) && !looksLikeBareEpisodeFile(parent+".mkv") && fromDir.Title != "" {
 		parsed.Title = fromDir.Title
 		parsed.MediaType = "tv"
@@ -1424,11 +1449,16 @@ func looksLikeBareEpisodeFile(fileName string) bool {
 }
 
 func looksLikeTVName(name string) bool {
-	base := filepath.Base(name)
-	if reTVSeasonEpisode.MatchString(base) || reTVSeasonCode.MatchString(base) || reTVSeasonOnly.MatchString(base) {
-		return true
+	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
+		base := filepath.Base(part)
+		if reTVSeasonEpisode.MatchString(base) || reTVSeasonCode.MatchString(base) || reTVSeasonOnly.MatchString(base) {
+			return true
+		}
+		if looksLikeBareEpisodeFile(base) {
+			return true
+		}
 	}
-	return looksLikeBareEpisodeFile(base)
+	return false
 }
 
 var reTVEpToken = regexp.MustCompile(`(?i)E(\d{1,3})`)
@@ -1615,6 +1645,68 @@ func sanitizeName(s string) string {
 	s = strings.ReplaceAll(s, "*", "_")
 	s = strings.ReplaceAll(s, "\\", "_")
 	return strings.TrimSpace(s)
+}
+
+func parseBareEpisodeNumber(fileName string) (int, bool) {
+	base := trimExt(filepath.Base(fileName))
+	if base == "" {
+		return 0, false
+	}
+	for _, r := range base {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(base)
+	if err != nil || n < 1 || n > 399 {
+		return 0, false
+	}
+	switch n {
+	case 480, 576, 720, 1080, 2160:
+		return 0, false
+	}
+	return n, true
+}
+
+func isJunkImportTitle(title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	switch t {
+	case "rarbg", "rarbg.com", "www", "proof", "proofs", "sample", "samples",
+		"screens", "screen", "nfo", "nfos", "new", "complete", "pack":
+		return true
+	}
+	if strings.HasPrefix(t, "www.") {
+		return true
+	}
+	if _, ok := parseBareEpisodeNumber(t + ".mkv"); ok {
+		return true
+	}
+	return false
+}
+
+func existingTitleDir(root, kindPrefix, title string) string {
+	safe := sanitizeName(title)
+	if safe == "" {
+		return safe
+	}
+	parent := root
+	if kindPrefix != "" {
+		parent = filepath.Join(root, kindPrefix)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return safe
+	}
+	want := strings.ToLower(safe)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if strings.ToLower(e.Name()) == want {
+			return e.Name()
+		}
+	}
+	return safe
 }
 
 // ── gRPC API ───────────────────────────────────────────────────
@@ -1922,7 +2014,8 @@ func hasMediaFiles(dir string, depth int) bool {
 
 func skipBonusDir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "extras", "extra", "samples", "sample", "featurettes", "featurette", "trailers", "trailer", "bonus":
+	case "extras", "extra", "samples", "sample", "featurettes", "featurette", "trailers", "trailer", "bonus",
+		"rarbg", "screens", "screen", "proofs", "proof", "nfo", "nfos":
 		return true
 	default:
 		return false
@@ -1940,7 +2033,7 @@ func pathInBonusDir(fullPath string) bool {
 
 func skipLibrarySubdir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "extras", "extra", "samples", "sample", "featurettes", "trailers", "other", "tv":
+	case "extras", "extra", "samples", "sample", "featurettes", "trailers", "other", "tv", "rarbg":
 		return true
 	default:
 		return false
@@ -2027,7 +2120,7 @@ func (m *Module) scanLibraryDirectory(dir, mediaType string) (found, imported, s
 func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool {
 	parsed := parseFileName(fileName)
 	enrichParsedFromPath(&parsed, fullPath)
-	if parsed.Title == "" {
+	if parsed.Title == "" || isJunkImportTitle(parsed.Title) {
 		return false
 	}
 	switch {

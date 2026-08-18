@@ -186,6 +186,55 @@ func TestImportLeadingEpisodeUsesTVLibraryRoot(t *testing.T) {
 	}
 }
 
+func TestImportBareEpisodeNumberInheritsSeries(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	m.tvLibraryRoot = filepath.Join(tmp, "shows")
+	srcDir := filepath.Join(tmp, "Mister.Rogers.Neighborhood.S01.1080p.WEBRip.x264-SnowPeck")
+	if err := os.MkdirAll(srcDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	srcFile := filepath.Join(srcDir, "001.mp4")
+	if err := os.WriteFile(srcFile, []byte("fake tv"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	movieLib := filepath.Join(tmp, "movies")
+	if !m.importFile(srcFile, "001.mp4", "both", movieLib) {
+		t.Fatal("expected numbered episode import")
+	}
+	want := filepath.Join(tmp, "shows", "Mister Rogers Neighborhood", "Season 01", "Mister Rogers Neighborhood.S01E01.mp4")
+	if _, err := os.Stat(want); os.IsNotExist(err) {
+		t.Fatal("expected dest", want)
+	}
+	if _, err := os.Stat(filepath.Join(movieLib, "Other")); !os.IsNotExist(err) {
+		t.Fatal("must not dump 001.mp4 into movies/Other")
+	}
+}
+
+func TestSkipJunkRARBGTitle(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "RARBG.mkv")
+	if err := os.WriteFile(src, []byte("junk"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if m.importFile(src, "RARBG.mkv", "both", filepath.Join(tmp, "movies")) {
+		t.Fatal("RARBG title must not import as a show")
+	}
+}
+
+func TestExistingTitleDirReusesCase(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "King of the Hill"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	got := existingTitleDir(root, "", "King Of The Hill")
+	if got != "King of the Hill" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestImportMovieRootDoesNotDoubleNest(t *testing.T) {
 	m := newTestModule(t)
 	tmp := t.TempDir()
