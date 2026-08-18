@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.18] — 2026-08-18
+
+### Fixed
+- Numbered episode files (`001.mp4`) in a season-pack folder inherit the series title and go to the TV library instead of `movies/Other`.
+- Junk titles (`RARBG`, proofs/screens folders) are not imported as shows.
+- TV dest folders reuse an existing series directory case-insensitively so `King Of The Hill` does not create a second show.
+
 ## [0.1.17] — 2026-08-18
 
 ### Added
