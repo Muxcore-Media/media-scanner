@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.10",
+		Version:        "0.1.11",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -526,6 +526,11 @@ func (m *Module) isAlreadyImported(path string) bool {
 // ── File Import ────────────────────────────────────────────────
 
 func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	if !isMediaExt(ext) {
+		slog.Debug("skipping non-media file", "file", fileName)
+		return false
+	}
 	var size int64
 	if info, err := os.Stat(fullPath); err == nil {
 		size = info.Size()
