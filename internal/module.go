@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.16",
+		Version:        "0.1.17",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -1653,8 +1653,12 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 	}
 
 	if !filepath.IsAbs(path) {
+		orig := path
 		if resolved, ok := resolveRelativeWatchPath(dirs, path); ok {
+			slog.Info("ImportPath resolved relative path", "from", orig, "to", resolved)
 			path = resolved
+		} else {
+			slog.Info("ImportPath relative path unresolved", "path", orig)
 		}
 	}
 

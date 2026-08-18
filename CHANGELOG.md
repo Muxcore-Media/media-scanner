@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.17] — 2026-08-18
+
+### Added
+- `ImportPath` logs relative → absolute resolution at Info (`from` / `to`, or unresolved).
+
 ## [0.1.16] — 2026-08-18
 
 ### Fixed
