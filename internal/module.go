@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.14",
+		Version:        "0.1.15",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -1652,6 +1652,12 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 		return nil, fmt.Errorf("not initialized")
 	}
 
+	if !filepath.IsAbs(path) {
+		if resolved, ok := resolveRelativeWatchPath(dirs, path); ok {
+			path = resolved
+		}
+	}
+
 	d, ok := deepestWatchDir(dirs, path)
 	if !ok {
 		return nil, fmt.Errorf("path %q is not under any registered watch directory", path)
@@ -1695,6 +1701,29 @@ func deepestWatchDir(dirs []watchDirEntry, path string) (watchDirEntry, bool) {
 				best = d
 				bestLen = len(root)
 			}
+		}
+	}
+	return best, bestLen >= 0
+}
+
+// resolveRelativeWatchPath joins a relative import path with each watch dir and
+// returns the candidate that exists on disk (deepest watch root wins).
+func resolveRelativeWatchPath(dirs []watchDirEntry, rel string) (string, bool) {
+	rel = strings.TrimPrefix(filepath.Clean(rel), string(os.PathSeparator))
+	if rel == "." || rel == "" {
+		return "", false
+	}
+	var best string
+	bestLen := -1
+	for _, d := range dirs {
+		root := filepath.Clean(d.path)
+		cand := filepath.Join(root, rel)
+		if _, err := os.Stat(cand); err != nil {
+			continue
+		}
+		if len(root) > bestLen {
+			best = cand
+			bestLen = len(root)
 		}
 	}
 	return best, bestLen >= 0

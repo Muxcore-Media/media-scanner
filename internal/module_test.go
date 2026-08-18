@@ -312,6 +312,34 @@ func TestScanCommand(t *testing.T) {
 	}
 }
 
+func TestImportPathRelativeUnderWatchDir(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "downloads")
+	libDir := filepath.Join(tmp, "library")
+	relDir := filepath.Join("partials", "mv_550", "btih_aa")
+	savePath := filepath.Join(srcDir, relDir)
+	if err := os.MkdirAll(savePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(savePath, "Test.Movie.2020.1080p.mkv"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := m.ImportPath(ctx, &scannerv1.ImportPathRequest{Path: filepath.Join(relDir, "Test.Movie.2020.1080p.mkv")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesImported != 1 {
+		t.Fatalf("imported=%d want 1", resp.FilesImported)
+	}
+}
+
 func TestImportPath(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()

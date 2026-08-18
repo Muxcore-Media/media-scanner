@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.15] — 2026-08-18
+
+### Fixed
+- `ImportPath` resolves relative paths (`partials/{item}/…`) against registered watch directories so completed torrents with a relative save path still import.
+
 ## [0.1.14] — 2026-08-18
 
 ### Fixed
