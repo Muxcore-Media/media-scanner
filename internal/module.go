@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.12",
+		Version:        "0.1.13",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -448,6 +448,9 @@ func (m *Module) scanDirectory(watchPath, mediaType, libPath string) (found, imp
 
 	for _, entry := range entries {
 		if entry.IsDir() {
+			if skipBonusDir(entry.Name()) {
+				continue
+			}
 			subFound, subImported, subSkipped := m.scanDirectory(filepath.Join(watchPath, entry.Name()), mediaType, libPath)
 			found += subFound
 			imported += subImported
@@ -539,6 +542,10 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		slog.Info("skipping sample/junk file", "file", fileName, "reason", reason, "size", size)
 		return false
 	}
+	if pathInBonusDir(fullPath) {
+		slog.Info("skipping extra/bonus file", "file", fileName, "path", fullPath)
+		return false
+	}
 
 	parsed := parseFileName(fileName)
 	enrichParsedFromPath(&parsed, fullPath)
@@ -566,7 +573,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		return false
 	}
 
-	if destSameSize(destPath, fullPath) {
+	if destKeepExisting(destPath, fullPath) {
 		slog.Info("skip import; destination already present",
 			"src", fileName, "dest", destPath, "storage_key", storageKey)
 		m.recordImported(fullPath, destPath, fileName, parsed, parsed.Quality)
@@ -601,7 +608,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		}
 	}
 	if !usedStorage {
-		if destSameSize(destPath, fullPath) {
+		if destKeepExisting(destPath, fullPath) {
 			slog.Info("skip local copy; destination already present",
 				"src", fileName, "dest", destPath)
 		} else {
@@ -664,7 +671,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 	return true
 }
 
-func destSameSize(destPath, srcPath string) bool {
+func destKeepExisting(destPath, srcPath string) bool {
 	if destPath == "" || srcPath == "" {
 		return false
 	}
@@ -676,7 +683,7 @@ func destSameSize(destPath, srcPath string) bool {
 	if err != nil || si.IsDir() {
 		return false
 	}
-	return di.Size() == si.Size() && di.Size() > 0
+	return di.Size() > 0 && di.Size() >= si.Size()
 }
 
 func (m *Module) recordImported(fullPath, destPath, fileName string, parsed parsedFile, quality string) {
@@ -1830,6 +1837,24 @@ func hasMediaFiles(dir string, depth int) bool {
 	return false
 }
 
+func skipBonusDir(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "extras", "extra", "samples", "sample", "featurettes", "featurette", "trailers", "trailer", "bonus":
+		return true
+	default:
+		return false
+	}
+}
+
+func pathInBonusDir(fullPath string) bool {
+	for _, p := range strings.Split(filepath.Clean(fullPath), string(os.PathSeparator)) {
+		if skipBonusDir(p) {
+			return true
+		}
+	}
+	return false
+}
+
 func skipLibrarySubdir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "extras", "extra", "samples", "sample", "featurettes", "trailers", "other", "tv":
@@ -2167,6 +2192,7 @@ func placeFile(src, dst, mode string) error {
 var (
 	reSampleName = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(sample|samples|trailer)(?:[.\-_ ]|$)`)
 	reSampleBase = regexp.MustCompile(`(?i)^(?:sample|samples|trailer)(?:[.\-_ ].*)?\.\w+$`)
+	reExtraName  = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(extras?|bonus|featurettes?|deleted[.\-_ ]?scenes?|alternate[.\-_ ]?scenes?|extended[.\-_ ]+or[.\-_ ]+alternate)(?:[.\-_ ]|$)`)
 	reEdition    = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(directors?[.\-_ ]?cut|extended(?:[.\-_ ]?cut)?|theatrical|unrated|remastered|criterion|imax)(?:[.\-_ ]|$)`)
 	reGroup      = regexp.MustCompile(`(?i)-([A-Za-z0-9]+)(?:\.\w+)?$`)
 	reProper     = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(proper|repack)(?:[.\-_ ]|$)`)
@@ -2181,6 +2207,9 @@ func (m *Module) isSampleFile(name string, size int64) (reason string, reject bo
 	}
 	if m.minVideoBytes > 0 && size > 0 && size < m.minVideoBytes {
 		return "below minimum video size", true
+	}
+	if reExtraName.MatchString(name) {
+		return "extra/bonus filename", true
 	}
 	sampleName := reSampleName.MatchString(name) || reSampleBase.MatchString(name)
 	if sampleName && (size == 0 || size < m.sampleMaxBytes) {

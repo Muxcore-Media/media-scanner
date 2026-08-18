@@ -61,6 +61,9 @@ func (m *Module) syncWatches() error {
 				return nil
 			}
 			if entry.IsDir() {
+				if skipBonusDir(entry.Name()) {
+					return filepath.SkipDir
+				}
 				want[path] = struct{}{}
 			}
 			return nil
