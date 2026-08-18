@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.10] — 2026-08-18
+
+### Fixed
+- `ImportPath` on a file imports **only that file**, not the whole parent downloads directory.
+- Skip storage put / recopy when the library destination already exists at the same size; record it as imported so the watch loop stops retrying.
+- 15-minute cooldown after `storage.Put` failures so a huge remux EOF does not hammer core gRPC.
+
+### Changed
+- TV/movie dest paths honor library root folder names (no extra `Movies/`/`TV/` prefix when the root is already that folder).
+- Filename parse: `Sxx Eyy`, leading `E01 Title`, season-code packs, dash episode numbers.
+
 ## [0.1.9] — 2026-08-10
 
 ### Added
