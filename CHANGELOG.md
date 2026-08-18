@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.16] — 2026-08-18
+
+### Fixed
+- `ImportPath` accepts files under `{cwd}/partials` and `{watchDir}/partials` so relative save paths from `keep_stalled_partials` still import when the downloader wrote next to the process cwd instead of the downloads watch dir.
+
 ## [0.1.15] — 2026-08-18
 
 ### Fixed
