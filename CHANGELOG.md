@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.11] — 2026-08-18
+
+### Fixed
+- `ImportPath` of a torrent file no longer imports sidecar junk (`.txt`, `.nfo`, etc.); media-extension check applies to single-file imports too.
+
 ## [0.1.10] — 2026-08-18
 
 ### Fixed

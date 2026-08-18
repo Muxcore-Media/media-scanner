@@ -427,6 +427,31 @@ func TestSkipImportWhenDestAlreadyPresent(t *testing.T) {
 	}
 }
 
+func TestImportPathSkipsNonMediaFile(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "downloads")
+	libDir := filepath.Join(tmp, "library")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	junk := filepath.Join(srcDir, "RARBG.txt")
+	if err := os.WriteFile(junk, []byte("rarbg"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := m.ImportPath(ctx, &scannerv1.ImportPathRequest{Path: junk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesImported != 0 {
+		t.Fatalf("imported junk file: %+v", resp)
+	}
+}
+
 func TestImportPathOutsideWatchDir(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()
