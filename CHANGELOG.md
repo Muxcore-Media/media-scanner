@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.20] — 2026-08-18
+
+### Fixed
+- A better-quality TV import replaces the worse file for the same episode (e.g. 1080p replaces 900p). Equal or worse copies are skipped so the library keeps one file per episode.
+
 ## [0.1.19] — 2026-08-18
 
 ### Fixed

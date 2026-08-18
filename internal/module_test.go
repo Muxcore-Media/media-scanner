@@ -928,6 +928,67 @@ func TestKeepLargerLibraryFile(t *testing.T) {
 	}
 }
 
+func TestQualityUpgradeReplacesWorseEpisode(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	m.tvLibraryRoot = filepath.Join(tmp, "shows")
+	season := filepath.Join(tmp, "shows", "Star Trek", "Season 03")
+	if err := os.MkdirAll(season, 0700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(season, "Star Trek - S03E24 - The Savage Curtain [900p].m4v")
+	if err := os.WriteFile(old, []byte("nine-hundred"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(tmp, "Star.Trek.S03E24.1080p.mkv")
+	if err := os.WriteFile(src, []byte("ten-eighty-upgrade-bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !m.importFile(src, filepath.Base(src), "both", filepath.Join(tmp, "movies"), "") {
+		t.Fatal("expected 1080p import to succeed")
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("900p copy should be removed after 1080p upgrade")
+	}
+	matches, err := filepath.Glob(filepath.Join(season, "*S03E24*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("want 1 episode file, got %v", matches)
+	}
+	if !strings.Contains(strings.ToLower(matches[0]), "1080") {
+		t.Fatalf("kept file should be 1080p, got %s", matches[0])
+	}
+}
+
+func TestWorseEpisodeDoesNotReplaceBetter(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	m.tvLibraryRoot = filepath.Join(tmp, "shows")
+	season := filepath.Join(tmp, "shows", "Star Trek", "Season 03")
+	if err := os.MkdirAll(season, 0700); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(season, "Star Trek - S03E24 - The Savage Curtain [1080p].mkv")
+	if err := os.WriteFile(keep, []byte("ten-eighty-library"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(tmp, "Star.Trek.S03E24.900p.m4v")
+	if err := os.WriteFile(src, []byte("worse"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !m.importFile(src, filepath.Base(src), "both", filepath.Join(tmp, "movies"), "") {
+		t.Fatal("skip of worse copy should still count as handled")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatal("1080p library file must remain")
+	}
+	if _, err := os.Stat(filepath.Join(season, "Star Trek.S03E24.900p.m4v")); !os.IsNotExist(err) {
+		t.Fatal("900p must not be added beside 1080p")
+	}
+}
+
 func TestParseEditionAndGroup(t *testing.T) {
 	ed, grp := parseEditionAndGroup("Movie.1999.Directors.Cut.1080p-GROUP.mkv")
 	if ed == "" {

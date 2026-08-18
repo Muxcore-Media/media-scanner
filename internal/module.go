@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.19",
+		Version:        "0.1.20",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -598,6 +598,12 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 		m.recordImported(fullPath, destPath, fileName, parsed, parsed.Quality)
 		return true
 	}
+	if keep, reason, existing := shouldKeepExistingEpisode(destPath, fullPath, parsed); keep {
+		slog.Info("skip import; equal or better episode already in library",
+			"src", fileName, "existing", existing, "reason", reason)
+		m.recordImported(fullPath, existing, fileName, parsed, parsed.Quality)
+		return true
+	}
 
 	usedStorage := false
 	destExists := destPath != ""
@@ -642,6 +648,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 				slog.Error("place file", "src", fullPath, "dst", destPath, "mode", m.importMode, "error", err)
 				return false
 			}
+			removeWorseEpisodeCopies(destPath, parsed)
 		}
 	}
 
@@ -705,6 +712,182 @@ func destKeepExisting(destPath, srcPath string) bool {
 		return false
 	}
 	return di.Size() > 0 && di.Size() >= si.Size()
+}
+
+var reEpisodeTagInName = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,4})`)
+
+func shouldKeepExistingEpisode(destPath, srcPath string, parsed parsedFile) (keep bool, reason, existing string) {
+	if parsed.MediaType != "tv" || destPath == "" {
+		return false, "", ""
+	}
+	best := bestExistingEpisodeFile(filepath.Dir(destPath), parsed)
+	if best == "" || sameFilePath(best, destPath) || sameFilePath(best, srcPath) {
+		return false, "", ""
+	}
+	if !sourceBeatsEpisodeFile(srcPath, parsed.Quality, best) {
+		return true, "existing quality/size wins", best
+	}
+	return false, "", best
+}
+
+func removeWorseEpisodeCopies(keptPath string, parsed parsedFile) {
+	if parsed.MediaType != "tv" || keptPath == "" {
+		return
+	}
+	dir := filepath.Dir(keptPath)
+	for _, p := range episodeFilesInDir(dir, parsed) {
+		if sameFilePath(p, keptPath) {
+			continue
+		}
+		if !sourceBeatsEpisodeFile(keptPath, parsed.Quality, p) {
+			continue
+		}
+		if err := os.Remove(p); err != nil {
+			slog.Warn("remove superseded episode copy", "path", p, "kept", keptPath, "error", err)
+			continue
+		}
+		slog.Info("removed superseded episode copy", "path", p, "kept", keptPath)
+	}
+}
+
+func bestExistingEpisodeFile(dir string, parsed parsedFile) string {
+	files := episodeFilesInDir(dir, parsed)
+	if len(files) == 0 {
+		return ""
+	}
+	best := files[0]
+	for _, p := range files[1:] {
+		if sourceBeatsEpisodeFile(p, extractQuality(filepath.Base(p)), best) {
+			best = p
+		}
+	}
+	return best
+}
+
+func episodeFilesInDir(dir string, parsed parsedFile) []string {
+	if dir == "" || dir == "." {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !isMediaExt(strings.ToLower(filepath.Ext(name))) {
+			continue
+		}
+		if !fileMatchesEpisode(name, parsed) {
+			continue
+		}
+		out = append(out, filepath.Join(dir, name))
+	}
+	return out
+}
+
+func fileMatchesEpisode(name string, parsed parsedFile) bool {
+	tags := reEpisodeTagInName.FindAllStringSubmatch(name, -1)
+	if len(tags) == 0 {
+		return false
+	}
+	want := map[int]struct{}{}
+	eps := parsed.Episodes
+	if len(eps) == 0 && parsed.Episode > 0 {
+		eps = []int{parsed.Episode}
+	}
+	if len(eps) == 0 {
+		return false
+	}
+	for _, e := range eps {
+		want[e] = struct{}{}
+	}
+	got := map[int]struct{}{}
+	gotSeason := -1
+	for _, m := range tags {
+		s, _ := strconv.Atoi(m[1])
+		e, _ := strconv.Atoi(m[2])
+		if gotSeason < 0 {
+			gotSeason = s
+		} else if s != gotSeason {
+			return false
+		}
+		got[e] = struct{}{}
+	}
+	if gotSeason != parsed.Season {
+		return false
+	}
+	if len(got) != len(want) {
+		return false
+	}
+	for e := range want {
+		if _, ok := got[e]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func sourceBeatsEpisodeFile(srcPath, srcQuality, existingPath string) bool {
+	if existingPath == "" {
+		return true
+	}
+	qNew := qualityScore(srcQuality)
+	if qNew == 0 {
+		qNew = qualityScore(extractQuality(filepath.Base(srcPath)))
+	}
+	qOld := qualityScore(extractQuality(filepath.Base(existingPath)))
+	if qNew != qOld {
+		return qNew > qOld
+	}
+	si, err1 := os.Stat(srcPath)
+	di, err2 := os.Stat(existingPath)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return si.Size() > di.Size()
+}
+
+func qualityScore(label string) int {
+	l := strings.ToLower(label)
+	score := 0
+	switch {
+	case strings.Contains(l, "2160") || strings.Contains(l, "4k") || strings.Contains(l, "uhd"):
+		score += 4000
+	case strings.Contains(l, "1080"):
+		score += 1080
+	case strings.Contains(l, "900"):
+		score += 900
+	case strings.Contains(l, "720"):
+		score += 720
+	case strings.Contains(l, "576"):
+		score += 576
+	case strings.Contains(l, "480"):
+		score += 480
+	}
+	switch {
+	case strings.Contains(l, "remux"):
+		score += 50
+	case strings.Contains(l, "bluray") || strings.Contains(l, "blu-ray") || strings.Contains(l, "bdrip") || strings.Contains(l, "brrip"):
+		score += 30
+	case strings.Contains(l, "web-dl") || strings.Contains(l, "webdl"):
+		score += 20
+	case strings.Contains(l, "webrip"):
+		score += 10
+	case strings.Contains(l, "hdtv"):
+		score += 5
+	}
+	return score
+}
+
+func sameFilePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 func (m *Module) recordImported(fullPath, destPath, fileName string, parsed parsedFile, quality string) {
