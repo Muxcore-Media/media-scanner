@@ -309,6 +309,13 @@ func TestImportMovieRootDoesNotDoubleNest(t *testing.T) {
 	}
 }
 
+func TestMeshStorageOffByDefault(t *testing.T) {
+	m := newTestModule(t)
+	if m.useMeshStorage {
+		t.Fatal("mesh storage.Put must be off unless SCANNER_USE_MESH_STORAGE is set")
+	}
+}
+
 func TestImportFileWithSidecarSubtitle(t *testing.T) {
 	m := newTestModule(t)
 

@@ -61,6 +61,8 @@ type Module struct {
 	initialDelay  time.Duration
 	scanMu        sync.Mutex
 
+	useMeshStorage bool
+
 	putFailMu    sync.Mutex
 	putFailUntil map[string]time.Time
 }
@@ -78,6 +80,7 @@ type Config struct {
 	DebounceWait     time.Duration
 	SafetyRescan     time.Duration
 	InitialScanDelay time.Duration
+	UseMeshStorage   bool
 }
 
 func NewModule(cfg Config) *Module {
@@ -134,6 +137,14 @@ func NewModule(cfg Config) *Module {
 			}
 		}
 	}
+	if v := os.Getenv("SCANNER_USE_MESH_STORAGE"); v != "" {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			cfg.UseMeshStorage = true
+		default:
+			cfg.UseMeshStorage = false
+		}
+	}
 	debounceWait := cfg.DebounceWait
 	if debounceWait <= 0 {
 		debounceWait = 5 * time.Second
@@ -170,6 +181,7 @@ func NewModule(cfg Config) *Module {
 		debounceWait:    debounceWait,
 		safetyRescan:    safetyRescan,
 		initialDelay:    initialDelay,
+		useMeshStorage:  cfg.UseMeshStorage,
 	}
 }
 
@@ -177,7 +189,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.20",
+		Version:        "0.1.21",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -614,7 +626,9 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 	}
 	// Local library dest: copy/link on disk. Mesh Storage.Put EOFs on large files
 	// (vault remuxes) and then falls back anyway — skip the round-trip.
-	tryStorage := m.mc != nil && destPath == "" && !destExists && !m.storagePutCooling(storageKey)
+	// Mesh Storage.Put EOFs on large files on this host. Local copy/link unless
+	// SCANNER_USE_MESH_STORAGE is explicitly enabled.
+	tryStorage := m.useMeshStorage && m.mc != nil && destPath == "" && !destExists && !m.storagePutCooling(storageKey)
 	if tryStorage {
 		f, err := os.Open(fullPath)
 		if err != nil {
@@ -1257,19 +1271,19 @@ func (m *Module) importSidecarSubtitles(srcVideo, destVideo, storageKey string) 
 		subKey := filepath.ToSlash(filepath.Join(filepath.Dir(storageKey), destName))
 
 		registeredPath := ""
-		if m.mc != nil {
+		if m.useMeshStorage && m.mc != nil {
 			f, err := os.Open(srcSub)
 			if err != nil {
 				continue
 			}
 			if err := m.mc.Storage.Put(context.Background(), subKey, f); err != nil {
 				f.Close()
-				slog.Debug("storage put subtitle failed", "key", subKey, "error", err)
+				slog.Debug("storage put subtitle failed; copying locally", "key", subKey, "error", err)
 			} else {
 				f.Close()
 				os.Remove(srcSub)
+				continue
 			}
-			continue
 		}
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			continue
