@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13] — 2026-08-18
+
+### Fixed
+- Do not import **extras / bonus / featurettes / alternate scenes** as the main episode. Breaking Bad S04 extras were overwriting `S04E01 Box Cutter` in the library.
+- Skip `Extras/` (and similar) folders in the download watch scan.
+- Do not replace an existing library file with a **smaller** source.
+
 ## [0.1.12] — 2026-08-18
 
 ### Fixed

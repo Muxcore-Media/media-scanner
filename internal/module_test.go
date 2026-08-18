@@ -694,10 +694,61 @@ func TestSampleRejection(t *testing.T) {
 	if _, reject := m.isSampleFile("Fight.Club.1999.1080p.mkv", 50*1024*1024); reject {
 		t.Fatal("normal release should not reject")
 	}
+	if reason, reject := m.isSampleFile("Breaking Bad - S04E01 Extra - Inside Breaking Bad.m4v", 22*1024*1024); !reject {
+		t.Fatalf("expected extra reject, reason=%q", reason)
+	}
+	if reason, reject := m.isSampleFile("Breaking Bad - S04E01 Extended or Alternate Scene - Skyler Gets Her Purse.m4v", 2*1024*1024); !reject {
+		t.Fatalf("expected alternate-scene reject, reason=%q", reason)
+	}
+	if _, reject := m.isSampleFile("Fight.Club.1999.Extended.Cut.1080p.mkv", 50*1024*1024); reject {
+		t.Fatal("extended cut edition should not reject as extra")
+	}
 
 	m.minVideoBytes = 5 * 1024 * 1024
 	if _, reject := m.isSampleFile("Fight.Club.1999.1080p.mkv", 1024); !reject {
 		t.Fatal("tiny video should reject")
+	}
+}
+
+func TestScanSkipsExtrasDir(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "downloads")
+	libDir := filepath.Join(tmp, "library")
+	extras := filepath.Join(srcDir, "Show S01", "Extras")
+	if err := os.MkdirAll(extras, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Show S01", "Show.S01E01.mkv"), []byte("episode-bytes-here"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extras, "Show - S01E01 Extra - Inside.mkv"), []byte("tiny-extra"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, imported, _ := m.scanDirectory(srcDir, "tv", libDir)
+	if found != 1 {
+		t.Fatalf("found=%d want 1 (extras dir skipped)", found)
+	}
+	if imported != 1 {
+		t.Fatalf("imported=%d want 1", imported)
+	}
+}
+
+func TestKeepLargerLibraryFile(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "dest.mkv")
+	src := filepath.Join(t.TempDir(), "src.mkv")
+	if err := os.WriteFile(dest, []byte("larger-library-file-contents"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("small"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !destKeepExisting(dest, src) {
+		t.Fatal("should keep larger dest")
+	}
+	if destKeepExisting(src, dest) {
+		t.Fatal("smaller dest should not block larger src")
 	}
 }
 
