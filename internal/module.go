@@ -136,7 +136,7 @@ func NewModule(cfg Config) *Module {
 	}
 	debounceWait := cfg.DebounceWait
 	if debounceWait <= 0 {
-		debounceWait = 400 * time.Millisecond
+		debounceWait = 5 * time.Second
 	}
 	initialDelay := 5 * time.Second
 	if cfg.InitialScanDelay < 0 {
@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.11",
+		Version:        "0.1.12",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",

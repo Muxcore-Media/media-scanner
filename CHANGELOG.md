@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.12] — 2026-08-18
+
+### Fixed
+- Ignore `*.part` / temp writes in the download watch dir so in-progress torrents do not trigger a full rescan every few seconds.
+- Default fsnotify debounce 400ms → 5s.
+
 ## [0.1.11] — 2026-08-18
 
 ### Fixed

@@ -165,9 +165,22 @@ func (m *Module) handleFSEvent(ev fsnotify.Event) {
 	if !m.eventUnderWatch(ev.Name) {
 		return
 	}
+	if ignoreIncompleteWatchPath(ev.Name) {
+		return
+	}
 	if ev.Has(fsnotify.Create) || ev.Has(fsnotify.Write) || ev.Has(fsnotify.Rename) || ev.Has(fsnotify.Remove) {
 		m.scheduleScan()
 	}
+}
+
+// ignoreIncompleteWatchPath skips in-progress torrent pieces so WRITE storms
+// on *.part files do not rescan the whole downloads tree every few seconds.
+func ignoreIncompleteWatchPath(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	if strings.HasSuffix(base, ".part") || strings.HasSuffix(base, ".!ut") || strings.HasSuffix(base, ".tmp") {
+		return true
+	}
+	return false
 }
 
 func (m *Module) eventUnderWatch(path string) bool {

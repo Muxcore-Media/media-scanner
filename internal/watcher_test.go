@@ -57,3 +57,15 @@ func TestFsnotifyTriggersImport(t *testing.T) {
 	}
 	t.Fatal("file was not imported via fsnotify within timeout:", dest)
 }
+
+func TestIgnoreIncompleteWatchPath(t *testing.T) {
+	if !ignoreIncompleteWatchPath("/downloads/show/ep.mkv.part") {
+		t.Fatal("expected .part ignored")
+	}
+	if !ignoreIncompleteWatchPath("/downloads/ep.!ut") {
+		t.Fatal("expected .!ut ignored")
+	}
+	if ignoreIncompleteWatchPath("/downloads/Inception.2010.1080p.mkv") {
+		t.Fatal("media file should still trigger scans")
+	}
+}
