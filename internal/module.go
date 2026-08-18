@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.13",
+		Version:        "0.1.14",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -587,7 +587,9 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 			destExists = false
 		}
 	}
-	tryStorage := m.mc != nil && !destExists && !m.storagePutCooling(storageKey)
+	// Local library dest: copy/link on disk. Mesh Storage.Put EOFs on large files
+	// (vault remuxes) and then falls back anyway — skip the round-trip.
+	tryStorage := m.mc != nil && destPath == "" && !destExists && !m.storagePutCooling(storageKey)
 	if tryStorage {
 		f, err := os.Open(fullPath)
 		if err != nil {

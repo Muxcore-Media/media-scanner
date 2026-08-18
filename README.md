@@ -6,7 +6,7 @@
 
 **Scans download directories, identifies media files via filename parsing, and imports them into an organized library structure.**
 
-A MuxCore sidecar module that watches download directories for new media files, parses their filenames to identify movies and TV shows, and organizes them into a clean library hierarchy. When connected to core, imports go through the storage API; otherwise files are hardlinked/copied/moved on the local filesystem.
+A MuxCore sidecar module that watches download directories for new media files, parses their filenames to identify movies and TV shows, and organizes them into a clean library hierarchy. Imports use a local copy/hardlink/move into the library dest; core `storage.Put` is only used when no local dest path is configured.
 
 ---
 
