@@ -85,7 +85,7 @@ func TestExtractZipBeforeImport(t *testing.T) {
 		"Fight.Club.1999.1080p.BluRay.mkv": []byte("fake media"),
 	})
 
-	found, imported, skipped := m.scanDirectory(srcDir, "movie", libDir)
+	found, imported, skipped := m.scanDirectory(srcDir, "movie", libDir, "")
 	if found != 1 {
 		t.Fatalf("found=%d imported=%d skipped=%d", found, imported, skipped)
 	}

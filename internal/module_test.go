@@ -98,7 +98,7 @@ func TestImportFile(t *testing.T) {
 	}
 
 	libPath := filepath.Join(tmp, "library")
-	result := m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", "movie", libPath)
+	result := m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", "movie", libPath, "")
 	if !result {
 		t.Fatal("expected import to succeed")
 	}
@@ -125,7 +125,7 @@ func TestImportTVShow(t *testing.T) {
 	}
 
 	libPath := filepath.Join(tmp, "library")
-	result := m.importFile(srcFile, "Breaking.Bad.S05E01.1080p.BluRay.mkv", "tv", libPath)
+	result := m.importFile(srcFile, "Breaking.Bad.S05E01.1080p.BluRay.mkv", "tv", libPath, "")
 	if !result {
 		t.Fatal("expected TV import to succeed")
 	}
@@ -145,7 +145,7 @@ func TestImportTVUsesTVLibraryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, "Dragon.Tales.S01E01.mkv", "both", movieLib) {
+	if !m.importFile(srcFile, "Dragon.Tales.S01E01.mkv", "both", movieLib, "") {
 		t.Fatal("expected TV import to succeed")
 	}
 	want := filepath.Join(tmp, "shows", "Dragon Tales", "Season 01", "Dragon Tales.S01E01.mkv")
@@ -155,6 +155,63 @@ func TestImportTVUsesTVLibraryRoot(t *testing.T) {
 	nested := filepath.Join(movieLib, "TV")
 	if _, err := os.Stat(nested); !os.IsNotExist(err) {
 		t.Fatal("must not nest TV under the movie library")
+	}
+}
+
+func TestTVImportNeverUsesMovieLibraryRoot(t *testing.T) {
+	m := newTestModule(t)
+	m.tvLibraryRoot = ""
+	tmp := t.TempDir()
+	srcFile := filepath.Join(tmp, "King.Of.The.Hill.S01E01.mkv")
+	if err := os.WriteFile(srcFile, []byte("fake tv"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	movieLib := filepath.Join(tmp, "movies")
+	if !m.importFile(srcFile, "King.Of.The.Hill.S01E01.mkv", "both", movieLib, "") {
+		t.Fatal("expected TV import to succeed")
+	}
+	want := filepath.Join(tmp, "shows", "King Of The Hill", "Season 01", "King Of The Hill.S01E01.mkv")
+	if _, err := os.Stat(want); os.IsNotExist(err) {
+		t.Fatal("TV file must resolve next to movies/, missing:", want)
+	}
+	if _, err := os.Stat(filepath.Join(movieLib, "TV")); !os.IsNotExist(err) {
+		t.Fatal("TV must not resolve under the movie library path")
+	}
+}
+
+func TestAutoRegisterWatchDualLibraryRoots(t *testing.T) {
+	tmp := t.TempDir()
+	watch := filepath.Join(tmp, "downloads")
+	movies := filepath.Join(tmp, "movies")
+	shows := filepath.Join(tmp, "shows")
+	if err := os.MkdirAll(watch, 0700); err != nil {
+		t.Fatal(err)
+	}
+	m := NewModule(Config{
+		DBPath:          filepath.Join(tmp, "scanner.db"),
+		GRPCAddr:        ":0",
+		ImportMode:      "move",
+		MinVideoBytes:   -1,
+		DefaultWatchDir: watch,
+		LibraryRoot:     movies,
+		TVLibraryRoot:   shows,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Stop(ctx) })
+
+	var lib, tv string
+	err := m.db.QueryRow(`SELECT library_path, tv_library_path FROM watch_dirs WHERE path = ?`, watch).Scan(&lib, &tv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lib != movies {
+		t.Fatalf("watch movie dest = %q, want %q", lib, movies)
+	}
+	if tv != shows {
+		t.Fatalf("watch TV dest = %q, want %q", tv, shows)
 	}
 }
 
@@ -171,7 +228,7 @@ func TestImportLeadingEpisodeUsesTVLibraryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, filepath.Base(srcFile), "both", movieLib) {
+	if !m.importFile(srcFile, filepath.Base(srcFile), "both", movieLib, "") {
 		t.Fatal("expected leading-episode import to succeed")
 	}
 	matches, err := filepath.Glob(filepath.Join(tmp, "shows", "The New Adventures of Winnie the Pooh", "*", "*E10*"))
@@ -199,7 +256,7 @@ func TestImportBareEpisodeNumberInheritsSeries(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, "001.mp4", "both", movieLib) {
+	if !m.importFile(srcFile, "001.mp4", "both", movieLib, "") {
 		t.Fatal("expected numbered episode import")
 	}
 	want := filepath.Join(tmp, "shows", "Mister Rogers Neighborhood", "Season 01", "Mister Rogers Neighborhood.S01E01.mp4")
@@ -218,7 +275,7 @@ func TestSkipJunkRARBGTitle(t *testing.T) {
 	if err := os.WriteFile(src, []byte("junk"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if m.importFile(src, "RARBG.mkv", "both", filepath.Join(tmp, "movies")) {
+	if m.importFile(src, "RARBG.mkv", "both", filepath.Join(tmp, "movies"), "") {
 		t.Fatal("RARBG title must not import as a show")
 	}
 }
@@ -243,7 +300,7 @@ func TestImportMovieRootDoesNotDoubleNest(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, "Totoro.1988.mkv", "movie", movieLib) {
+	if !m.importFile(srcFile, "Totoro.1988.mkv", "movie", movieLib, "") {
 		t.Fatal("expected movie import")
 	}
 	want := filepath.Join(movieLib, "Totoro (1988)", "Totoro.1988.mkv")
@@ -266,7 +323,7 @@ func TestImportFileWithSidecarSubtitle(t *testing.T) {
 	}
 
 	libPath := filepath.Join(tmp, "library")
-	if !m.importFile(srcFile, "Inception.2010.1080p.mkv", "movie", libPath) {
+	if !m.importFile(srcFile, "Inception.2010.1080p.mkv", "movie", libPath, "") {
 		t.Fatal("expected import to succeed")
 	}
 
@@ -288,7 +345,7 @@ func TestImportDegradesWithoutCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	libPath := filepath.Join(tmp, "library")
-	if !m.importFile(srcFile, "Dune.2021.2160p.mkv", "movie", libPath) {
+	if !m.importFile(srcFile, "Dune.2021.2160p.mkv", "movie", libPath, "") {
 		t.Fatal("import should succeed without renamer/ffprobe")
 	}
 }
@@ -312,7 +369,7 @@ func TestScanDirectory(t *testing.T) {
 		os.WriteFile(filepath.Join(srcDir, f), []byte(f), 0644)
 	}
 
-	found, imported, skipped := m.scanDirectory(srcDir, "both", libDir)
+	found, imported, skipped := m.scanDirectory(srcDir, "both", libDir, "")
 	if found != 3 {
 		t.Errorf("expected 3 media files found, got %d", found)
 	}
@@ -324,7 +381,7 @@ func TestScanDirectory(t *testing.T) {
 	}
 
 	// Second scan: files were moved away, so nothing to find
-	found2, imported2, skipped2 := m.scanDirectory(srcDir, "both", libDir)
+	found2, imported2, skipped2 := m.scanDirectory(srcDir, "both", libDir, "")
 	if found2 != 0 {
 		t.Errorf("expected 0 found on second scan (files moved), got %d", found2)
 	}
@@ -520,7 +577,7 @@ func TestSkipImportWhenDestAlreadyPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	parsed := parseFileName(filepath.Base(src))
-	_, dest := m.resolveImportPaths(parsed, libDir, src)
+	_, dest := m.resolveImportPaths(parsed, libDir, "", src)
 	if dest == "" {
 		t.Fatal("expected dest path")
 	}
@@ -778,7 +835,7 @@ func TestImportHardlinkKeepsSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	libPath := filepath.Join(tmp, "library")
-	if !m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", "movie", libPath) {
+	if !m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", "movie", libPath, "") {
 		t.Fatal("expected import to succeed")
 	}
 	if _, err := os.Stat(srcFile); err != nil {
@@ -845,7 +902,7 @@ func TestScanSkipsExtrasDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	found, imported, _ := m.scanDirectory(srcDir, "tv", libDir)
+	found, imported, _ := m.scanDirectory(srcDir, "tv", libDir, "")
 	if found != 1 {
 		t.Fatalf("found=%d want 1 (extras dir skipped)", found)
 	}

@@ -44,8 +44,9 @@ Download dir ──→ media-scanner ──→ Organized library
 |----------|---------|-------------|
 | `SCANNER_DB_PATH` | `/var/lib/media-scanner/scanner.db` | SQLite database path |
 | `SCANNER_GRPC_ADDR` | `:9470` | gRPC listen address |
-| `SCANNER_LIBRARY_ROOT` | `/data/media` | Root directory for organized media |
-| `SCANNER_DEFAULT_WATCH_DIR` | _(empty)_ | Auto-register this path as a watch dir on start |
+| `SCANNER_LIBRARY_ROOT` | `/data/media` | Movie library dest for mixed (`both`) watch dirs |
+| `SCANNER_TV_LIBRARY_ROOT` | _(empty)_ | TV library dest for mixed watch dirs. When unset, TV next to a `movies/` root goes to sibling `shows/` — never under the movie path |
+| `SCANNER_DEFAULT_WATCH_DIR` | _(empty)_ | Auto-register this path as a watch dir on start (stores both movie and TV dest roots) |
 | `SCANNER_IMPORT_MODE` | `hardlink` | Local import mode when core storage is unavailable: `hardlink`, `copy`, or `move` |
 | `SCANNER_SAMPLE_MAX_BYTES` | `209715200` (200 MiB) | Max size for sample/trailer filename rejection |
 | `SCANNER_MIN_VIDEO_BYTES` | `5242880` (5 MiB) | Reject videos smaller than this (`0` disables) |

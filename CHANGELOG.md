@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.19] — 2026-08-18
+
+### Fixed
+- A downloads watch dir stores both movie (`library_path`) and TV (`tv_library_path`) dest roots. TV files never resolve under a `movies/` library path (they go to `SCANNER_TV_LIBRARY_ROOT`, or a sibling `shows/` folder).
+
 ## [0.1.18] — 2026-08-18
 
 ### Fixed
