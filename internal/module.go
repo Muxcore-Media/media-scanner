@@ -177,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.15",
+		Version:        "0.1.16",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -1647,7 +1647,7 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 	}
 	path = filepath.Clean(path)
 
-	dirs := m.collectWatchDirs()
+	dirs := withPartialsImportRoots(m.collectWatchDirs())
 	if dirs == nil {
 		return nil, fmt.Errorf("not initialized")
 	}
@@ -1706,6 +1706,49 @@ func deepestWatchDir(dirs []watchDirEntry, path string) (watchDirEntry, bool) {
 	return best, bestLen >= 0
 }
 
+// withPartialsImportRoots lets ImportPath accept completed torrents that landed
+// in {cwd}/partials or {watchDir}/partials when keep_stalled_partials used a
+// relative save path. These roots are not added to the watch/scan loop.
+func withPartialsImportRoots(dirs []watchDirEntry) []watchDirEntry {
+	if dirs == nil {
+		return nil
+	}
+	lib, mt := "", "both"
+	seen := map[string]struct{}{}
+	for _, d := range dirs {
+		seen[filepath.Clean(d.path)] = struct{}{}
+		if strings.TrimSpace(d.libPath) != "" {
+			lib = d.libPath
+		}
+		if d.mediaType != "" {
+			mt = d.mediaType
+		}
+	}
+	add := func(p string) {
+		p = filepath.Clean(strings.TrimSpace(p))
+		if p == "" || p == "." {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		fi, err := os.Stat(p)
+		if err != nil || !fi.IsDir() {
+			return
+		}
+		seen[p] = struct{}{}
+		dirs = append(dirs, watchDirEntry{path: p, mediaType: mt, libPath: lib})
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		add(filepath.Join(cwd, "partials"))
+	}
+	orig := append([]watchDirEntry(nil), dirs...)
+	for _, d := range orig {
+		add(filepath.Join(d.path, "partials"))
+	}
+	return dirs
+}
+
 // resolveRelativeWatchPath joins a relative import path with each watch dir and
 // returns the candidate that exists on disk (deepest watch root wins).
 func resolveRelativeWatchPath(dirs []watchDirEntry, rel string) (string, bool) {
@@ -1715,16 +1758,21 @@ func resolveRelativeWatchPath(dirs []watchDirEntry, rel string) (string, bool) {
 	}
 	var best string
 	bestLen := -1
-	for _, d := range dirs {
-		root := filepath.Clean(d.path)
-		cand := filepath.Join(root, rel)
+	try := func(root, cand string) {
 		if _, err := os.Stat(cand); err != nil {
-			continue
+			return
 		}
 		if len(root) > bestLen {
 			best = cand
 			bestLen = len(root)
 		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		try(cwd, filepath.Join(cwd, rel))
+	}
+	for _, d := range dirs {
+		root := filepath.Clean(d.path)
+		try(root, filepath.Join(root, rel))
 	}
 	return best, bestLen >= 0
 }

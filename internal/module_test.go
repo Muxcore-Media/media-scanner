@@ -312,6 +312,48 @@ func TestScanCommand(t *testing.T) {
 	}
 }
 
+func TestImportPathRelativeUnderCwdPartials(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	tmp := t.TempDir()
+	watch := filepath.Join(tmp, "downloads")
+	libDir := filepath.Join(tmp, "library")
+	cwd := filepath.Join(tmp, "mvp")
+	relDir := filepath.Join("partials", "ep_tv_253", "pending_x")
+	savePath := filepath.Join(cwd, relDir)
+	if err := os.MkdirAll(watch, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(savePath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(savePath, "Star.Trek.S03E24.1080p.mkv")
+	if err := os.WriteFile(src, []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: watch, LibraryPath: libDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	resp, err := m.ImportPath(ctx, &scannerv1.ImportPathRequest{Path: filepath.Join(relDir, "Star.Trek.S03E24.1080p.mkv")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesImported != 1 {
+		t.Fatalf("imported=%d want 1 (cwd/partials must be an import root)", resp.FilesImported)
+	}
+}
+
 func TestImportPathRelativeUnderWatchDir(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()
