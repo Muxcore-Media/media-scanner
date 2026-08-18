@@ -6,7 +6,7 @@
 
 **Scans download directories, identifies media files via filename parsing, and imports them into an organized library structure.**
 
-A MuxCore sidecar module that watches download directories for new media files, parses their filenames to identify movies and TV shows, and organizes them into a clean library hierarchy. Imports use a local copy/hardlink/move into the library dest; core `storage.Put` is only used when no local dest path is configured.
+Imports use a local copy/hardlink/move into the library dest. Core `storage.Put` is opt-in (`SCANNER_USE_MESH_STORAGE=true`) and is not used on the vault host path.
 
 ---
 
@@ -50,7 +50,7 @@ Download dir ──→ media-scanner ──→ Organized library
 | `SCANNER_IMPORT_MODE` | `hardlink` | Local import mode when core storage is unavailable: `hardlink`, `copy`, or `move` |
 | `SCANNER_SAMPLE_MAX_BYTES` | `209715200` (200 MiB) | Max size for sample/trailer filename rejection |
 | `SCANNER_MIN_VIDEO_BYTES` | `5242880` (5 MiB) | Reject videos smaller than this (`0` disables) |
-| `SCANNER_SAFETY_RESCAN` | `15m` | Fallback full rescan interval (`0` disables) |
+| `SCANNER_USE_MESH_STORAGE` | `false` | If true, call core `storage.Put` when no local dest path exists. Off by default — Put EOFs on large files on this host |
 | `MUXCORE_GRPC_ADDR` | `localhost:9090` | Core mesh gRPC address |
 | `MUXCORE_INSECURE_DISABLE_TLS` | `false` | Disable TLS for dev |
 

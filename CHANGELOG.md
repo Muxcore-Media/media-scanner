@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.21] — 2026-08-18
+
+### Fixed
+- Mesh `storage.Put` is off unless `SCANNER_USE_MESH_STORAGE=true`. Local library copy/link is the default, so vault imports no longer EOF on Put and fall back. Sidecar subtitles copy locally when Put is disabled or fails.
+
 ## [0.1.20] — 2026-08-18
 
 ### Fixed
