@@ -136,6 +136,73 @@ func TestImportTVShow(t *testing.T) {
 	}
 }
 
+func TestImportTVUsesTVLibraryRoot(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	m.tvLibraryRoot = filepath.Join(tmp, "shows")
+	srcFile := filepath.Join(tmp, "Dragon.Tales.S01E01.mkv")
+	if err := os.WriteFile(srcFile, []byte("fake tv"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	movieLib := filepath.Join(tmp, "movies")
+	if !m.importFile(srcFile, "Dragon.Tales.S01E01.mkv", "both", movieLib) {
+		t.Fatal("expected TV import to succeed")
+	}
+	want := filepath.Join(tmp, "shows", "Dragon Tales", "Season 01", "Dragon Tales.S01E01.mkv")
+	if _, err := os.Stat(want); os.IsNotExist(err) {
+		t.Fatal("TV file should land in SCANNER_TV_LIBRARY_ROOT, missing:", want)
+	}
+	nested := filepath.Join(movieLib, "TV")
+	if _, err := os.Stat(nested); !os.IsNotExist(err) {
+		t.Fatal("must not nest TV under the movie library")
+	}
+}
+
+func TestImportLeadingEpisodeUsesTVLibraryRoot(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	m.tvLibraryRoot = filepath.Join(tmp, "shows")
+	srcDir := filepath.Join(tmp, "The New Adventures of Winnie the Pooh")
+	if err := os.MkdirAll(srcDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	srcFile := filepath.Join(srcDir, "E10 How Much Is That Rabbit In The Window.mkv")
+	if err := os.WriteFile(srcFile, []byte("fake tv"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	movieLib := filepath.Join(tmp, "movies")
+	if !m.importFile(srcFile, filepath.Base(srcFile), "both", movieLib) {
+		t.Fatal("expected leading-episode import to succeed")
+	}
+	matches, err := filepath.Glob(filepath.Join(tmp, "shows", "The New Adventures of Winnie the Pooh", "*", "*E10*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected Pooh episode under TV library, not movies/Other")
+	}
+	if _, err := os.Stat(filepath.Join(movieLib, "Other")); !os.IsNotExist(err) {
+		t.Fatal("must not dump leading-episode TV into movies/Other")
+	}
+}
+
+func TestImportMovieRootDoesNotDoubleNest(t *testing.T) {
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	srcFile := filepath.Join(tmp, "Totoro.1988.mkv")
+	if err := os.WriteFile(srcFile, []byte("fake movie"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	movieLib := filepath.Join(tmp, "movies")
+	if !m.importFile(srcFile, "Totoro.1988.mkv", "movie", movieLib) {
+		t.Fatal("expected movie import")
+	}
+	want := filepath.Join(movieLib, "Totoro (1988)", "Totoro.1988.mkv")
+	if _, err := os.Stat(want); os.IsNotExist(err) {
+		t.Fatal("expected dest without extra Movies/ folder:", want)
+	}
+}
+
 func TestImportFileWithSidecarSubtitle(t *testing.T) {
 	m := newTestModule(t)
 
@@ -281,6 +348,85 @@ func TestImportPath(t *testing.T) {
 	}
 }
 
+func TestImportPathFileDoesNotScanSiblings(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "downloads")
+	libDir := filepath.Join(tmp, "library")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(srcDir, "Wanted.Movie.2021.1080p.mkv")
+	other := filepath.Join(srcDir, "Other.Movie.2019.1080p.mkv")
+	if err := os.WriteFile(want, []byte("wanted-bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("other-bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := m.ImportPath(ctx, &scannerv1.ImportPathRequest{Path: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesFound != 1 || resp.FilesImported != 1 {
+		t.Fatalf("found=%d imported=%d want 1/1", resp.FilesFound, resp.FilesImported)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("sibling should not be imported/moved: %v", err)
+	}
+}
+
+func TestSkipImportWhenDestAlreadyPresent(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	tmp := t.TempDir()
+	srcDir := filepath.Join(tmp, "downloads")
+	libDir := filepath.Join(tmp, "library")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(srcDir, "Fight.Club.1999.1080p.mkv")
+	payload := []byte("same-payload")
+	if err := os.WriteFile(src, payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir}); err != nil {
+		t.Fatal(err)
+	}
+	parsed := parseFileName(filepath.Base(src))
+	_, dest := m.resolveImportPaths(parsed, libDir, src)
+	if dest == "" {
+		t.Fatal("expected dest path")
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, payload, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := m.ImportPath(ctx, &scannerv1.ImportPathRequest{Path: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FilesImported != 1 {
+		t.Fatalf("imported=%d want 1", resp.FilesImported)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("source should remain when dest already matches: %v", err)
+	}
+	if !m.isAlreadyImported(src) {
+		t.Fatal("expected original path recorded as imported")
+	}
+}
+
 func TestImportPathOutsideWatchDir(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()
@@ -391,6 +537,9 @@ func TestParseFileNameTV(t *testing.T) {
 		{"Game.of.Thrones.S01E10.720p.HDTV.mkv", "Game of Thrones", 1, 10, "tv"},
 		{"Show.Name.1x05.1080p.mkv", "Show Name", 1, 5, "tv"},
 		{"show.name.s02e03.720p.WEB-DL.mp4", "show name", 2, 3, "tv"},
+		{"Mister.Rogers.Neighborhood.S01.E001.SDTV.mkv", "Mister Rogers Neighborhood", 1, 1, "tv"},
+		{"Mister Rogers Neighborhood S03 480p WEBRIP - 005 [480p.WEBRIP].mp4", "Mister Rogers Neighborhood", 3, 5, "tv"},
+		{"E10 How Much Is That Rabbit In The Window.mkv", "How Much Is That Rabbit In The Window", 0, 10, "tv"},
 	}
 	for _, tt := range tests {
 		p := parseFileName(tt.input)

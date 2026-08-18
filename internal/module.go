@@ -60,6 +60,9 @@ type Module struct {
 	safetyRescan  time.Duration
 	initialDelay  time.Duration
 	scanMu        sync.Mutex
+
+	putFailMu    sync.Mutex
+	putFailUntil map[string]time.Time
 }
 
 type Config struct {
@@ -174,7 +177,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.9",
+		Version:        "0.1.10",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -533,6 +536,15 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 	}
 
 	parsed := parseFileName(fileName)
+	enrichParsedFromPath(&parsed, fullPath)
+	if parsed.MediaType == "other" {
+		switch {
+		case mediaType == "tv" || looksLikeTVName(fileName) || looksLikeTVName(fullPath):
+			parsed.MediaType = "tv"
+		case mediaType == "movie" || parsed.Year > 0:
+			parsed.MediaType = "movie"
+		}
+	}
 	if parsed.Title == "" {
 		slog.Debug("unable to parse filename", "file", fileName)
 		return false
@@ -549,8 +561,22 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		return false
 	}
 
+	if destSameSize(destPath, fullPath) {
+		slog.Info("skip import; destination already present",
+			"src", fileName, "dest", destPath, "storage_key", storageKey)
+		m.recordImported(fullPath, destPath, fileName, parsed, parsed.Quality)
+		return true
+	}
+
 	usedStorage := false
-	if m.mc != nil {
+	destExists := destPath != ""
+	if destExists {
+		if _, err := os.Stat(destPath); err != nil {
+			destExists = false
+		}
+	}
+	tryStorage := m.mc != nil && !destExists && !m.storagePutCooling(storageKey)
+	if tryStorage {
 		f, err := os.Open(fullPath)
 		if err != nil {
 			slog.Error("open source file for storage put", "src", fullPath, "error", err)
@@ -558,6 +584,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		}
 		if err := m.mc.Storage.Put(context.Background(), storageKey, f); err != nil {
 			f.Close()
+			m.markStoragePutFailed(storageKey)
 			slog.Warn("storage put failed; falling back to local import",
 				"key", storageKey, "error", err, "mode", m.importMode)
 		} else {
@@ -569,14 +596,19 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		}
 	}
 	if !usedStorage {
-		destDir := filepath.Dir(destPath)
-		if err := os.MkdirAll(destDir, 0755); err != nil {
-			slog.Error("create destination directory", "path", destDir, "error", err)
-			return false
-		}
-		if err := placeFile(fullPath, destPath, m.importMode); err != nil {
-			slog.Error("place file", "src", fullPath, "dst", destPath, "mode", m.importMode, "error", err)
-			return false
+		if destSameSize(destPath, fullPath) {
+			slog.Info("skip local copy; destination already present",
+				"src", fileName, "dest", destPath)
+		} else {
+			destDir := filepath.Dir(destPath)
+			if err := os.MkdirAll(destDir, 0755); err != nil {
+				slog.Error("create destination directory", "path", destDir, "error", err)
+				return false
+			}
+			if err := placeFile(fullPath, destPath, m.importMode); err != nil {
+				slog.Error("place file", "src", fullPath, "dst", destPath, "mode", m.importMode, "error", err)
+				return false
+			}
 		}
 	}
 
@@ -603,14 +635,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 		}
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
-
-	m.mu.Lock()
-	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
-		importID, fullPath, recordedDest, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
-	)
-	m.mu.Unlock()
+	m.recordImported(fullPath, recordedDest, fileName, parsed, quality)
 
 	slog.Info("imported file", "src", fileName, "dest", recordedDest, "storage_key", storageKey, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
 
@@ -634,25 +659,102 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath string) bool 
 	return true
 }
 
+func destSameSize(destPath, srcPath string) bool {
+	if destPath == "" || srcPath == "" {
+		return false
+	}
+	di, err := os.Stat(destPath)
+	if err != nil || di.IsDir() {
+		return false
+	}
+	si, err := os.Stat(srcPath)
+	if err != nil || si.IsDir() {
+		return false
+	}
+	return di.Size() == si.Size() && di.Size() > 0
+}
+
+func (m *Module) recordImported(fullPath, destPath, fileName string, parsed parsedFile, quality string) {
+	if m.isAlreadyImported(fullPath) || (destPath != "" && m.isAlreadyImported(destPath)) {
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
+	m.mu.Lock()
+	_, _ = m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
+		importID, fullPath, destPath, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
+	)
+	m.mu.Unlock()
+}
+
+func (m *Module) storagePutCooling(key string) bool {
+	m.putFailMu.Lock()
+	defer m.putFailMu.Unlock()
+	until, ok := m.putFailUntil[key]
+	return ok && time.Now().Before(until)
+}
+
+func (m *Module) markStoragePutFailed(key string) {
+	m.putFailMu.Lock()
+	defer m.putFailMu.Unlock()
+	if m.putFailUntil == nil {
+		m.putFailUntil = make(map[string]time.Time)
+	}
+	m.putFailUntil[key] = time.Now().Add(15 * time.Minute)
+}
+
+func (m *Module) destRootFor(parsed parsedFile, libPath string) string {
+	if parsed.MediaType == "tv" {
+		m.mu.RLock()
+		tv := m.tvLibraryRoot
+		m.mu.RUnlock()
+		if strings.TrimSpace(tv) != "" {
+			return tv
+		}
+	}
+	if strings.TrimSpace(libPath) != "" {
+		return libPath
+	}
+	return m.libraryRoot
+}
+
+func libraryKindPrefix(root, mediaType string) string {
+	base := strings.ToLower(filepath.Base(filepath.Clean(root)))
+	switch mediaType {
+	case "movie":
+		for _, n := range movieLibraryDirNames {
+			if base == strings.ToLower(n) {
+				return ""
+			}
+		}
+		return "Movies"
+	case "tv":
+		for _, n := range tvLibraryDirNames {
+			if base == strings.ToLower(n) {
+				return ""
+			}
+		}
+		return "TV"
+	default:
+		return "Other"
+	}
+}
+
 func (m *Module) resolveImportPaths(parsed parsedFile, libPath, fullPath string) (storageKey, destPath string) {
 	storageKey = m.buildStorageKey(parsed)
 	destPath = m.buildDestPath(parsed, libPath)
-	tplID := m.namingTemplateForLibPath(libPath)
+	tplID := m.namingTemplateForLibPath(m.destRootFor(parsed, libPath))
 	if preview := m.previewRename(fullPath, parsed, tplID); preview != nil && preview.GetNewPath() != "" {
-		folder := "Other"
-		switch parsed.MediaType {
-		case "movie":
-			folder = "Movies"
-		case "tv":
-			folder = "TV"
-		}
+		root := m.destRootFor(parsed, libPath)
+		folder := libraryKindPrefix(root, parsed.MediaType)
 		rel := filepath.Clean(preview.GetNewPath())
-		storageKey = filepath.ToSlash(filepath.Join("media", folder, rel))
-		root := libPath
-		if root == "" {
-			root = m.libraryRoot
+		if folder == "" {
+			storageKey = filepath.ToSlash(filepath.Join("media", rel))
+			destPath = filepath.Join(root, rel)
+		} else {
+			storageKey = filepath.ToSlash(filepath.Join("media", folder, rel))
+			destPath = filepath.Join(root, folder, rel)
 		}
-		destPath = filepath.Join(root, folder, rel)
 	}
 	return storageKey, destPath
 }
@@ -1055,12 +1157,20 @@ func (m *Module) buildStorageKey(p parsedFile) string {
 }
 
 func (m *Module) buildDestPath(p parsedFile, libPath string) string {
-	root := libPath
-	if root == "" {
-		root = m.libraryRoot
-	}
+	root := m.destRootFor(p, libPath)
+	folder := libraryKindPrefix(root, p.MediaType)
 	safeTitle := sanitizeName(p.Title)
 	ext := filepath.Ext(p.FileName)
+
+	join := func(elem ...string) string {
+		parts := make([]string, 0, 1+len(elem))
+		parts = append(parts, root)
+		if folder != "" {
+			parts = append(parts, folder)
+		}
+		parts = append(parts, elem...)
+		return filepath.Join(parts...)
+	}
 
 	switch p.MediaType {
 	case "movie":
@@ -1068,12 +1178,11 @@ func (m *Module) buildDestPath(p parsedFile, libPath string) string {
 		if p.Year > 0 {
 			yearStr = fmt.Sprintf(" (%d)", p.Year)
 		}
-		dir := filepath.Join(root, "Movies", safeTitle+yearStr)
 		base := fmt.Sprintf("%s.%d%s", safeTitle, p.Year, ext)
 		if p.Quality != "" {
 			base = fmt.Sprintf("%s.%d.%s%s", safeTitle, p.Year, p.Quality, ext)
 		}
-		return filepath.Join(dir, base)
+		return join(safeTitle+yearStr, base)
 
 	case "tv":
 		seasonDir := fmt.Sprintf("Season %02d", p.Season)
@@ -1082,11 +1191,10 @@ func (m *Module) buildDestPath(p parsedFile, libPath string) string {
 		if p.Quality != "" {
 			epBase = fmt.Sprintf("%s.%s.%s", safeTitle, tag, p.Quality)
 		}
-		dir := filepath.Join(root, "TV", safeTitle, seasonDir)
-		return filepath.Join(dir, epBase+ext)
+		return join(safeTitle, seasonDir, epBase+ext)
 
 	default:
-		return filepath.Join(root, "Other", safeTitle, p.FileName)
+		return join(safeTitle, p.FileName)
 	}
 }
 
@@ -1102,9 +1210,12 @@ var (
 	reTVMultiEpRange  = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})-E?(\d{1,3})(?:[.\s-_]|$|\.)`)
 	reTVMultiEpChain  = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})((?:E\d{1,3}){1,20})(?:[.\s-_]|$|\.)`)
 	reTVNxNRange      = regexp.MustCompile(`(?i)[.\s-_]+(\d{1,2})x(\d{1,3})-(\d{1,2})x(\d{1,3})(?:[.\s-_]|$|\.)`)
-	reTVSeasonEpisode = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})E(\d{1,3})(?:[.\s-_]|$|\.)`)
+	reTVSeasonEpisode = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})[.\s-_]*E(\d{1,3})(?:[.\s-_]|$|\.)`)
+	reTVLeadingEp     = regexp.MustCompile(`(?i)^E(?:P)?(\d{1,3})(?:P\d+)?(?:[.\s-_]+)(.+)$`)
 	reTVSeasonEpLong  = regexp.MustCompile(`(?i)[.\s-_]+(\d{1,2})x(\d{1,3})(?:[.\s-_]|$|\.)`)
 	reTVSeasonOnly    = regexp.MustCompile(`(?i)[.\s-_]+Season[.\s-_]+(\d{1,2})(?:[.\s-_]|$|\.)`)
+	reTVSeasonCode    = regexp.MustCompile(`(?i)[.\s-_]+S(\d{1,2})(?:[.\s-_]|$|\.)`)
+	reDashEpisode     = regexp.MustCompile(`(?i)\s+-\s+(\d{2,3})(?:\s*[.\[]|$)`)
 	reTVEpisodeOnly   = regexp.MustCompile(`(?i)[.\s-_]+Episode[.\s-_]+(\d{1,3})(?:[.\s-_]|$|\.)`)
 	reTVAirDate       = regexp.MustCompile(`(?i)[.\s-_]+(20\d{2}|19\d{2})[.\s-_](\d{2})[.\s-_](\d{2})(?:[.\s-_]|$|\.)`)
 	reAbsoluteBracket = regexp.MustCompile(`(?i)\[(\d{2,4})\]`)
@@ -1183,6 +1294,10 @@ func parseFileName(fileName string) parsedFile {
 		result.Episode, _ = strconv.Atoi(m[2])
 		result.Episodes = []int{result.Episode}
 		result.Title = extractTVTitle(fileName, m[0])
+	} else if m := reTVSeasonCode.FindStringSubmatch(fileName); len(m) >= 2 {
+		result.MediaType = "tv"
+		result.Season, _ = strconv.Atoi(m[1])
+		result.Title = extractTVTitle(fileName, m[0])
 	} else if reTVSeasonOnly.MatchString(fileName) || reTVEpisodeOnly.MatchString(fileName) {
 		result.MediaType = "tv"
 		if m := reTVSeasonOnly.FindStringSubmatch(fileName); len(m) >= 2 {
@@ -1204,6 +1319,13 @@ func parseFileName(fileName string) parsedFile {
 		result.MediaType = "tv"
 		result.AbsoluteNumber = abs
 		result.Title = extractTVTitleAbsolute(fileName)
+	} else if m := reTVLeadingEp.FindStringSubmatch(trimExt(fileName)); len(m) >= 3 {
+		result.MediaType = "tv"
+		n, _ := strconv.Atoi(m[1])
+		result.AbsoluteNumber = n
+		result.Episode = n
+		result.Episodes = []int{n}
+		result.Title = cleanTitle(m[2])
 	} else if m := reMovieParen.FindStringSubmatch(fileName); len(m) >= 3 {
 		result.MediaType = "movie"
 		result.Title = cleanTitle(m[1])
@@ -1226,6 +1348,15 @@ func parseFileName(fileName string) parsedFile {
 
 	if result.MediaType == "tv" {
 		result.Title, result.Year = stripTrailingYear(result.Title, result.Year)
+		if result.Episode == 0 && len(result.Episodes) == 0 {
+			if m := reDashEpisode.FindStringSubmatch(fileName); len(m) >= 2 {
+				n, _ := strconv.Atoi(m[1])
+				if n > 0 {
+					result.Episode = n
+					result.Episodes = []int{n}
+				}
+			}
+		}
 	}
 
 	result.Quality = extractQuality(fileName)
@@ -1239,17 +1370,27 @@ func enrichParsedFromPath(parsed *parsedFile, fullPath string) {
 	if tm := reTMDBID.FindStringSubmatch(fullPath); len(tm) >= 2 && parsed.TMDBID == 0 {
 		parsed.TMDBID, _ = strconv.Atoi(tm[1])
 	}
-	if parsed.Title != "" && parsed.Year > 0 && parsed.MediaType != "other" {
-		return
-	}
 	parent := filepath.Base(filepath.Dir(fullPath))
 	if isSeasonDirName(parent) {
 		parent = filepath.Base(filepath.Dir(filepath.Dir(fullPath)))
 	}
 	if parent == "" || parent == "." || skipLibrarySubdir(parent) {
+		if parsed.Title != "" && parsed.Year > 0 && parsed.MediaType != "other" {
+			return
+		}
 		return
 	}
 	fromDir := parseFileName(parent + ".mkv")
+	if looksLikeBareEpisodeFile(parsed.FileName) && !looksLikeBareEpisodeFile(parent+".mkv") && fromDir.Title != "" {
+		parsed.Title = fromDir.Title
+		parsed.MediaType = "tv"
+		if parsed.Year == 0 {
+			parsed.Year = fromDir.Year
+		}
+	}
+	if parsed.Title != "" && parsed.Year > 0 && parsed.MediaType != "other" {
+		return
+	}
 	if parsed.Title == "" {
 		parsed.Title = fromDir.Title
 	}
@@ -1262,6 +1403,18 @@ func enrichParsedFromPath(parsed *parsedFile, fullPath string) {
 	if parsed.MediaType == "other" && fromDir.MediaType != "" {
 		parsed.MediaType = fromDir.MediaType
 	}
+}
+
+func looksLikeBareEpisodeFile(fileName string) bool {
+	return reTVLeadingEp.MatchString(trimExt(fileName))
+}
+
+func looksLikeTVName(name string) bool {
+	base := filepath.Base(name)
+	if reTVSeasonEpisode.MatchString(base) || reTVSeasonCode.MatchString(base) || reTVSeasonOnly.MatchString(base) {
+		return true
+	}
+	return looksLikeBareEpisodeFile(base)
 }
 
 var reTVEpToken = regexp.MustCompile(`(?i)E(\d{1,3})`)
@@ -1490,12 +1643,26 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 		return nil, fmt.Errorf("path %q is not under any registered watch directory", path)
 	}
 
-	scanPath := path
+	m.scanMu.Lock()
+	defer m.scanMu.Unlock()
+
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
-		scanPath = filepath.Dir(path)
+		found, imported, skipped := 1, 0, 0
+		if m.isAlreadyImported(path) {
+			skipped = 1
+		} else if m.importFile(path, filepath.Base(path), d.mediaType, d.libPath) {
+			imported = 1
+		} else {
+			skipped = 1
+		}
+		return &scannerv1.ImportPathResponse{
+			FilesFound:    int32(found),
+			FilesImported: int32(imported),
+			FilesSkipped:  int32(skipped),
+		}, nil
 	}
 
-	found, imported, skipped := m.scanDirectory(scanPath, d.mediaType, d.libPath)
+	found, imported, skipped := m.scanDirectory(path, d.mediaType, d.libPath)
 	return &scannerv1.ImportPathResponse{
 		FilesFound:    int32(found),
 		FilesImported: int32(imported),
@@ -1596,6 +1763,12 @@ func resolveLibraryDirs(root, mediaType string) []string {
 	if mediaType == "tv" {
 		names = tvLibraryDirNames
 	}
+	base := strings.ToLower(filepath.Base(root))
+	for _, name := range names {
+		if base == strings.ToLower(name) {
+			return []string{root}
+		}
+	}
 	var found []string
 	for _, name := range names {
 		p := filepath.Join(root, name)
@@ -1605,12 +1778,6 @@ func resolveLibraryDirs(root, mediaType string) []string {
 	}
 	if len(found) > 0 {
 		return found
-	}
-	base := strings.ToLower(filepath.Base(root))
-	for _, name := range names {
-		if base == strings.ToLower(name) {
-			return []string{root}
-		}
 	}
 	other := tvLibraryDirNames
 	if mediaType == "tv" {
@@ -1660,7 +1827,7 @@ func hasMediaFiles(dir string, depth int) bool {
 
 func skipLibrarySubdir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "extras", "extra", "samples", "sample", "featurettes", "trailers", "other":
+	case "extras", "extra", "samples", "sample", "featurettes", "trailers", "other", "tv":
 		return true
 	default:
 		return false
@@ -2001,6 +2168,12 @@ var (
 )
 
 func (m *Module) isSampleFile(name string, size int64) (reason string, reject bool) {
+	if size == 0 {
+		return "empty file", true
+	}
+	if strings.HasSuffix(strings.ToLower(name), ".part") {
+		return "incomplete download", true
+	}
 	if m.minVideoBytes > 0 && size > 0 && size < m.minVideoBytes {
 		return "below minimum video size", true
 	}
