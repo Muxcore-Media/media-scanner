@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.23] — 2026-08-20
+
+### Added
+- `ImportPath` accepts `storage://…` URIs (mesh StorageService). Lists `torrent/{ih}/files/` when given a prefix and streams objects into the library dest — no local DOWNLOAD_DIR watch required for mesh-backed torrents.
+
+## [0.1.22] — 2026-08-20
+
+### Added
+- `ListImportCandidates` — list unimported media files under enabled watch dirs for admin manual import.
+
 ## [0.1.21] — 2026-08-18
 
 ### Fixed

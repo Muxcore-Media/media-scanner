@@ -292,6 +292,22 @@ func TestExistingTitleDirReusesCase(t *testing.T) {
 	}
 }
 
+func TestExistingTitleDirPrefersTVDBIDOverBareTitle(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "When Calls the Heart"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	want := "When Calls the Heart (2014) [tvdbid-275517]"
+	if err := os.MkdirAll(filepath.Join(root, want), 0755); err != nil {
+		t.Fatal(err)
+	}
+	got := existingTitleDir(root, "", "When Calls the Heart")
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
 func TestImportMovieRootDoesNotDoubleNest(t *testing.T) {
 	m := newTestModule(t)
 	tmp := t.TempDir()
@@ -651,6 +667,28 @@ func TestImportPathOutsideWatchDir(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not under any registered watch directory") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestImportPathStorageRequiresMesh(t *testing.T) {
+	m := newTestModule(t)
+	_, err := m.ImportPath(context.Background(), &scannerv1.ImportPathRequest{
+		Path: "storage://torrent/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	})
+	if err == nil {
+		t.Fatal("expected error without mesh client")
+	}
+	if !strings.Contains(err.Error(), "mesh storage unavailable") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLooksLikeMediaStorageKey(t *testing.T) {
+	if !looksLikeMediaStorageKey("torrent/aa/files/Show.S01E01.mkv") {
+		t.Fatal("expected media key")
+	}
+	if looksLikeMediaStorageKey("torrent/aa/p/0") {
+		t.Fatal("piece key should not look like media")
 	}
 }
 

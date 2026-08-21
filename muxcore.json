@@ -1,7 +1,7 @@
 {
   "name": "Media Scanner",
   "description": "Scans download directories, identifies media files via filename parsing, and imports them into an organized library structure",
-  "version": "0.1.21",
+  "version": "0.1.23",
   "author": "MuxCore",
   "roles": [
     "scanner"
@@ -12,9 +12,9 @@
   ],
   "contracts": [
     {
-      "repo": "github.com/Muxcore-Media/core/pkg/contracts",
-      "interface": "MediaScanner",
-      "version": "v0.4.0"
+      "repo": "github.com/Muxcore-Media/contracts-scanner",
+      "interface": "ScannerService",
+      "version": "v0.1.0"
     }
   ],
   "minCoreVersion": "0.4.0"
