@@ -11,6 +11,7 @@ service ScannerService {
   rpc ListWatchDirs(ListWatchDirsRequest) returns (ListWatchDirsResponse);
   rpc ListImported(ListImportedRequest) returns (ListImportedResponse);
   rpc ImportPath(ImportPathRequest) returns (ImportPathResponse);
+  rpc ListImportCandidates(ListImportCandidatesRequest) returns (ListImportCandidatesResponse);
 }
 
 message ScanRequest {}
@@ -106,4 +107,19 @@ message ImportPathResponse {
   int32 files_found = 1;
   int32 files_imported = 2;
   int32 files_skipped = 3;
+}
+
+message ListImportCandidatesRequest {
+  int32 limit = 1;
+}
+
+message ImportCandidate {
+  string path = 1;
+  string name = 2;
+  int64 size = 3;
+  string watch_dir_id = 4;
+}
+
+message ListImportCandidatesResponse {
+  repeated ImportCandidate candidates = 1;
 }

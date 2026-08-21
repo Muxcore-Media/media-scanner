@@ -189,7 +189,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.21",
+		Version:        "0.1.25",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -681,7 +681,6 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 	}
 
 	m.importSidecarSubtitles(fullPath, destPath, storageKey)
-	m.detectEmbeddedSubtitles(analyzePath)
 
 	if m.importMode == "move" {
 		if _, err := os.Stat(fullPath); err == nil {
@@ -1242,6 +1241,47 @@ var sidecarSubtitleExts = map[string]bool{
 	".vtt": true,
 }
 
+func sidecarStemMatches(stem, videoBase string) bool {
+	stem = strings.TrimSpace(stem)
+	videoBase = strings.TrimSpace(videoBase)
+	if stem == "" || videoBase == "" {
+		return false
+	}
+	if stem == videoBase || strings.HasPrefix(stem, videoBase+".") || strings.HasPrefix(stem, videoBase+" ") {
+		return true
+	}
+	parts := strings.Split(videoBase, ".")
+	if len(parts) > 0 && parts[0] != "" {
+		if stem == parts[0] || strings.HasPrefix(stem, parts[0]+".") || strings.HasPrefix(stem, parts[0]+" ") {
+			return true
+		}
+	}
+	if len(parts) >= 2 {
+		prefix := strings.Join(parts[:2], ".")
+		if stem == prefix || strings.HasPrefix(stem, prefix+".") || strings.HasPrefix(stem, prefix+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+func sidecarDestName(destStem, stem, videoBase, ext string) string {
+	if strings.HasPrefix(stem, videoBase) {
+		return destStem + strings.TrimPrefix(stem, videoBase) + ext
+	}
+	parts := strings.Split(videoBase, ".")
+	if len(parts) > 0 && parts[0] != "" && strings.HasPrefix(stem, parts[0]+".") {
+		return destStem + strings.TrimPrefix(stem, parts[0]) + ext
+	}
+	if len(parts) >= 2 {
+		prefix := strings.Join(parts[:2], ".")
+		if strings.HasPrefix(stem, prefix+".") {
+			return destStem + strings.TrimPrefix(stem, prefix) + ext
+		}
+	}
+	return destStem + ext
+}
+
 func (m *Module) importSidecarSubtitles(srcVideo, destVideo, storageKey string) {
 	srcDir := filepath.Dir(srcVideo)
 	base := strings.TrimSuffix(filepath.Base(srcVideo), filepath.Ext(srcVideo))
@@ -1261,40 +1301,32 @@ func (m *Module) importSidecarSubtitles(srcVideo, destVideo, storageKey string) 
 			continue
 		}
 		stem := strings.TrimSuffix(name, filepath.Ext(name))
-		if !strings.HasPrefix(stem, base) {
+		if !sidecarStemMatches(stem, base) {
 			continue
 		}
-		suffix := strings.TrimPrefix(stem, base) // e.g. ".en" or ".en.forced"
-		destName := destStem + suffix + ext
+		destName := sidecarDestName(destStem, stem, base, ext)
 		srcSub := filepath.Join(srcDir, name)
 		destSub := filepath.Join(destDir, destName)
 		subKey := filepath.ToSlash(filepath.Join(filepath.Dir(storageKey), destName))
 
-		registeredPath := ""
-		if m.useMeshStorage && m.mc != nil {
-			f, err := os.Open(srcSub)
-			if err != nil {
-				continue
-			}
-			if err := m.mc.Storage.Put(context.Background(), subKey, f); err != nil {
-				f.Close()
-				slog.Debug("storage put subtitle failed; copying locally", "key", subKey, "error", err)
-			} else {
-				f.Close()
-				os.Remove(srcSub)
-				continue
-			}
-		}
-		if err := os.MkdirAll(destDir, 0755); err != nil {
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
 			continue
 		}
 		if err := copyFile(srcSub, destSub); err != nil {
 			slog.Debug("copy subtitle failed", "src", srcSub, "error", err)
 			continue
 		}
+		if m.useMeshStorage && m.mc != nil {
+			f, err := os.Open(destSub)
+			if err == nil {
+				if err := m.mc.Storage.Put(context.Background(), subKey, f); err != nil {
+					slog.Debug("storage put subtitle failed", "key", subKey, "error", err)
+				}
+				f.Close()
+			}
+		}
 		os.Remove(srcSub)
-		registeredPath = destSub
-		m.registerSidecarSubtitle(storageKey, registeredPath)
+		slog.Info("imported sidecar subtitle", "src", srcSub, "dest", destSub)
 	}
 }
 
@@ -1926,13 +1958,39 @@ func existingTitleDir(root, kindPrefix, title string) string {
 		return safe
 	}
 	want := strings.ToLower(safe)
+	var exact, tvdbid, prefixed string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		if strings.ToLower(e.Name()) == want {
-			return e.Name()
+		name := e.Name()
+		lower := strings.ToLower(name)
+		hasTVDB := strings.Contains(lower, "[tvdbid-")
+		if lower == want {
+			exact = name
+			if hasTVDB {
+				return name
+			}
+			continue
 		}
+		if strings.HasPrefix(lower, want+" (") || strings.HasPrefix(lower, want+" [") {
+			if hasTVDB && tvdbid == "" {
+				tvdbid = name
+			} else if prefixed == "" {
+				prefixed = name
+			}
+		}
+	}
+	// Prefer the library's tvdbid folder over a bare title dir so imports and
+	// wanted sync share one tree.
+	if tvdbid != "" {
+		return tvdbid
+	}
+	if exact != "" {
+		return exact
+	}
+	if prefixed != "" {
+		return prefixed
 	}
 	return safe
 }
@@ -1965,6 +2023,11 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 	if path == "" {
 		return nil, fmt.Errorf("path is required")
 	}
+
+	if strings.HasPrefix(path, "storage://") {
+		return m.importStoragePath(ctx, path)
+	}
+
 	path = filepath.Clean(path)
 
 	dirs := withPartialsImportRoots(m.collectWatchDirs())
@@ -2012,6 +2075,155 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 		FilesImported: int32(imported),
 		FilesSkipped:  int32(skipped),
 	}, nil
+}
+
+// importStoragePath imports media from mesh StorageService keys
+// (storage://torrent/{ih}/files/... or a prefix listing).
+func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.ImportPathResponse, error) {
+	uri = strings.TrimSpace(uri)
+	if strings.HasPrefix(uri, "storage:/") && !strings.HasPrefix(uri, "storage://") {
+		uri = "storage://" + strings.TrimPrefix(uri, "storage:/")
+	}
+	key := strings.TrimPrefix(uri, "storage://")
+	key = strings.TrimPrefix(key, "/")
+	if key == "" {
+		return nil, fmt.Errorf("empty storage key")
+	}
+	m.mu.RLock()
+	mc := m.mc
+	lib, tvLib := m.libraryRoot, m.tvLibraryRoot
+	m.mu.RUnlock()
+	if mc == nil {
+		return nil, fmt.Errorf("mesh storage unavailable for %s", uri)
+	}
+	// Prefer watch-dir library roots when registered.
+	for _, d := range m.collectWatchDirs() {
+		if strings.TrimSpace(d.libPath) != "" {
+			lib = d.libPath
+		}
+		if strings.TrimSpace(d.tvLibPath) != "" {
+			tvLib = d.tvLibPath
+		}
+	}
+
+	keys := []string{key}
+	if !looksLikeMediaStorageKey(key) {
+		objs, err := mc.Storage.List(ctx, strings.TrimSuffix(key, "/")+"/")
+		if err != nil {
+			return nil, fmt.Errorf("storage list %s: %w", key, err)
+		}
+		keys = keys[:0]
+		for _, o := range objs {
+			if o == nil || o.GetKey() == "" {
+				continue
+			}
+			if looksLikeMediaStorageKey(o.GetKey()) {
+				keys = append(keys, o.GetKey())
+			}
+		}
+		// Also try …/files/ subprefix when given torrent/{ih}
+		if len(keys) == 0 && !strings.Contains(key, "/files/") {
+			objs, err = mc.Storage.List(ctx, strings.TrimSuffix(key, "/")+"/files/")
+			if err == nil {
+				for _, o := range objs {
+					if o != nil && looksLikeMediaStorageKey(o.GetKey()) {
+						keys = append(keys, o.GetKey())
+					}
+				}
+			}
+		}
+	}
+
+	m.scanMu.Lock()
+	defer m.scanMu.Unlock()
+
+	var found, imported, skipped int
+	for _, k := range keys {
+		found++
+		srcURI := "storage://" + k
+		if m.isAlreadyImported(srcURI) {
+			skipped++
+			continue
+		}
+		base := filepath.Base(k)
+		if m.importStorageObject(ctx, mc, k, base, "both", lib, tvLib) {
+			imported++
+		} else {
+			skipped++
+		}
+	}
+	return &scannerv1.ImportPathResponse{
+		FilesFound:    int32(found),
+		FilesImported: int32(imported),
+		FilesSkipped:  int32(skipped),
+	}, nil
+}
+
+func looksLikeMediaStorageKey(key string) bool {
+	base := strings.ToLower(filepath.Base(key))
+	for _, ext := range []string{".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".ts", ".m2ts", ".mov", ".mpg", ".mpeg", ".webm"} {
+		if strings.HasSuffix(base, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Module) importStorageObject(ctx context.Context, mc *client.Client, key, fileName, mediaType, libPath, tvLibPath string) bool {
+	parsed := parseFileName(fileName)
+	if parsed.MediaType == "" || parsed.MediaType == "other" {
+		switch {
+		case mediaType == "tv" || looksLikeTVName(fileName):
+			parsed.MediaType = "tv"
+		case mediaType == "movie" || parsed.Year > 0:
+			parsed.MediaType = "movie"
+		}
+	}
+	if isJunkImportTitle(parsed.Title) || parsed.Title == "" || parsed.MediaType == "other" {
+		slog.Info("skipping storage object", "key", key, "title", parsed.Title)
+		return false
+	}
+	_, destPath := m.resolveImportPaths(parsed, libPath, tvLibPath, fileName)
+	if destPath == "" {
+		return false
+	}
+	srcURI := "storage://" + key
+	if fi, err := os.Stat(destPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
+		slog.Info("skip storage import; destination already present", "key", key, "dest", destPath)
+		m.recordImported(srcURI, destPath, fileName, parsed, parsed.Quality)
+		return true
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		slog.Error("create dest for storage import", "dest", destPath, "error", err)
+		return false
+	}
+	rc, err := mc.Storage.Get(ctx, key)
+	if err != nil {
+		slog.Error("storage get for import", "key", key, "error", err)
+		return false
+	}
+	defer func() { _ = rc.Close() }()
+	tmp := destPath + ".muxcore-partial"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		slog.Error("create partial dest", "path", tmp, "error", err)
+		return false
+	}
+	_, copyErr := io.Copy(f, rc)
+	closeErr := f.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(tmp)
+		slog.Error("copy storage object", "key", key, "error", copyErr, "close", closeErr)
+		return false
+	}
+	if err := os.Rename(tmp, destPath); err != nil {
+		_ = os.Remove(tmp)
+		slog.Error("rename storage import", "dest", destPath, "error", err)
+		return false
+	}
+	m.recordImported(srcURI, destPath, fileName, parsed, parsed.Quality)
+	slog.Info("imported from storage", "key", key, "dest", destPath)
+	return true
 }
 
 func deepestWatchDir(dirs []watchDirEntry, path string) (watchDirEntry, bool) {
@@ -2495,6 +2707,55 @@ func (m *Module) ListWatchDirs(ctx context.Context, req *scannerv1.ListWatchDirs
 		})
 	}
 	return &scannerv1.ListWatchDirsResponse{Dirs: dirs}, nil
+}
+
+func (m *Module) ListImportCandidates(ctx context.Context, req *scannerv1.ListImportCandidatesRequest) (*scannerv1.ListImportCandidatesResponse, error) {
+	limit := int(req.GetLimit())
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	dirsResp, err := m.ListWatchDirs(ctx, &scannerv1.ListWatchDirsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	var out []*scannerv1.ImportCandidate
+	for _, d := range dirsResp.GetDirs() {
+		if !d.GetEnabled() {
+			continue
+		}
+		_ = filepath.WalkDir(d.GetPath(), func(path string, de os.DirEntry, err error) error {
+			if err != nil || de == nil {
+				return nil
+			}
+			if de.IsDir() {
+				if skipBonusDir(de.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !isMediaExt(strings.ToLower(filepath.Ext(de.Name()))) {
+				return nil
+			}
+			if m.isAlreadyImported(path) {
+				return nil
+			}
+			var size int64
+			if info, serr := de.Info(); serr == nil {
+				size = info.Size()
+			}
+			out = append(out, &scannerv1.ImportCandidate{
+				Path: path, Name: de.Name(), Size: size, WatchDirId: d.GetId(),
+			})
+			if len(out) >= limit {
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return &scannerv1.ListImportCandidatesResponse{Candidates: out}, nil
 }
 
 func (m *Module) ListImported(ctx context.Context, req *scannerv1.ListImportedRequest) (*scannerv1.ListImportedResponse, error) {
