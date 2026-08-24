@@ -23,7 +23,7 @@ func (m *Module) listRegisteredRoots(ctx context.Context) ([]*rootsv1.RootFolder
 	if err != nil {
 		return nil, false
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	cli := rootsv1.NewRootFolderServiceClient(conn)
 	resp, err := cli.ListRoots(ctx, &rootsv1.ListRootsRequest{})
 	if err != nil {
