@@ -112,7 +112,7 @@ func extractZip(archivePath, dest string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	for _, f := range r.File {
 		target, err := safeExtractPath(dest, f.Name)
@@ -134,12 +134,12 @@ func extractZip(archivePath, dest string) ([]string, error) {
 		}
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
 		if err != nil {
-			rc.Close()
+			_ = rc.Close()
 			return nil, err
 		}
 		_, copyErr := io.Copy(out, rc)
 		closeErr := out.Close()
-		rc.Close()
+		_ = rc.Close()
 		if copyErr != nil {
 			return nil, copyErr
 		}
@@ -155,7 +155,7 @@ func extractRar(archivePath, dest string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	for {
 		hdr, err := rc.Next()

@@ -34,7 +34,7 @@ func TestFsnotifyTriggersImport(t *testing.T) {
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 
 	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{
 		Path: srcDir, LibraryPath: libDir, MediaType: "movie",
