@@ -23,7 +23,7 @@ func newTestModule(t *testing.T) *Module {
 	if err := m.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 	return m
 }
 
@@ -200,7 +200,7 @@ func TestAutoRegisterWatchDualLibraryRoots(t *testing.T) {
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 
 	var lib, tv string
 	err := m.db.QueryRow(`SELECT library_path, tv_library_path FROM watch_dirs WHERE path = ?`, watch).Scan(&lib, &tv)
@@ -380,7 +380,9 @@ func TestScanDirectory(t *testing.T) {
 	srcDir := filepath.Join(tmp, "downloads")
 	libDir := filepath.Join(tmp, "library")
 
-	os.MkdirAll(srcDir, 0755)
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	files := []string{
 		"Fight.Club.1999.1080p.BluRay.mkv",
@@ -389,7 +391,9 @@ func TestScanDirectory(t *testing.T) {
 		"note.txt",
 	}
 	for _, f := range files {
-		os.WriteFile(filepath.Join(srcDir, f), []byte(f), 0644)
+		if err := os.WriteFile(filepath.Join(srcDir, f), []byte(f), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	found, imported, skipped, err := m.scanDirectory(context.Background(), srcDir, "both", libDir, "", false)
@@ -430,10 +434,16 @@ func TestScanCommand(t *testing.T) {
 	srcDir := filepath.Join(tmp, "downloads")
 	libDir := filepath.Join(tmp, "library")
 
-	os.MkdirAll(srcDir, 0755)
-	os.WriteFile(filepath.Join(srcDir, "Test.Movie.2020.1080p.mkv"), []byte("data"), 0644)
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "Test.Movie.2020.1080p.mkv"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
-	m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir})
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir}); err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := m.Scan(ctx, &scannerv1.ScanRequest{})
 	if err != nil {
@@ -878,7 +888,7 @@ func TestImportHardlinkKeepsSource(t *testing.T) {
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 
 	tmp := t.TempDir()
 	srcFile := filepath.Join(tmp, "Fight.Club.1999.1080p.BluRay.mkv")
@@ -910,7 +920,7 @@ func TestSampleRejection(t *testing.T) {
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 
 	if reason, reject := m.isSampleFile("Movie.Sample.mkv", 50*1024*1024); !reject {
 		t.Fatalf("expected sample reject, reason=%q", reason)
@@ -1088,7 +1098,7 @@ func TestScanLibraryRootsInPlace(t *testing.T) {
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 
 	resp, err := m.ScanLibraryRoots(ctx, &scannerv1.ScanLibraryRootsRequest{})
 	if err != nil {
@@ -1150,7 +1160,7 @@ func TestScanLibraryRootsLeafMoviesDir(t *testing.T) {
 	if err := m.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 
 	resp, err := m.ScanLibraryRoots(ctx, &scannerv1.ScanLibraryRootsRequest{})
 	if err != nil {
