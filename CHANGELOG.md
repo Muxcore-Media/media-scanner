@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.26] — 2026-08-22
+
+### Fixed
+- `ImportPath` treats already-imported files as success (`FilesImported=1`) so automation retries stop failing on idempotent re-imports.
+- `ImportPath` honors caller context cancellation and deadlines during directory walks and ffprobe quality probes.
+- Paths outside registered watch directories, and unresolved relative paths, include the configured watch roots in the error message.
+- Single-file import of rejected or unrecognized media returns an error instead of a silent skip response.
+- Directory and `storage://` imports return an error when media files are found but none are imported.
+
+### Changed
+- Import-path validation and error formatting extracted to `internal/import_path.go`.
+
 ## [0.1.23] — 2026-08-20
 
 ### Added

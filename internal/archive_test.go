@@ -2,6 +2,7 @@ package internal
 
 import (
 	"archive/zip"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,7 +86,10 @@ func TestExtractZipBeforeImport(t *testing.T) {
 		"Fight.Club.1999.1080p.BluRay.mkv": []byte("fake media"),
 	})
 
-	found, imported, skipped := m.scanDirectory(srcDir, "movie", libDir, "")
+	found, imported, skipped, err := m.scanDirectory(context.Background(), srcDir, "movie", libDir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if found != 1 {
 		t.Fatalf("found=%d imported=%d skipped=%d", found, imported, skipped)
 	}

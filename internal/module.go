@@ -21,7 +21,7 @@ import (
 
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
 	renamev1 "github.com/Muxcore-Media/media-rename/proto/renamev1"
-	scannerv1 "github.com/Muxcore-Media/media-scanner/proto/scannerv1"
+	scannerv1 "github.com/Muxcore-Media/contracts-scanner/muxcore/scanner/v1"
 	subtv1 "github.com/Muxcore-Media/media-subtitles/proto/subtv1"
 	tvmgmtv1 "github.com/Muxcore-Media/media-tvshows/proto/tvmgmtv1"
 
@@ -39,17 +39,18 @@ type Module struct {
 	db *sql.DB
 	mc *client.Client
 
-	id              string
-	dbPath          string
-	grpcAddr        string
-	libraryRoot     string
-	tvLibraryRoot   string
-	defaultWatchDir string
-	importMode      string
-	sampleMaxBytes  int64
-	minVideoBytes   int64
-	grpcSrv         *grpc.Server
-	grpcLis         net.Listener
+	id               string
+	dbPath           string
+	grpcAddr         string
+	libraryRoot      string
+	tvLibraryRoot    string
+	musicLibraryRoot string
+	defaultWatchDir  string
+	importMode       string
+	sampleMaxBytes   int64
+	minVideoBytes    int64
+	grpcSrv          *grpc.Server
+	grpcLis          net.Listener
 
 	watcher       *fsnotify.Watcher
 	watched       map[string]struct{}
@@ -65,6 +66,18 @@ type Module struct {
 
 	putFailMu    sync.Mutex
 	putFailUntil map[string]time.Time
+
+	// Set during ImportPath when automation passes wanted-item hints.
+	importHints *ImportHints
+}
+
+// ImportHints carries acquisition metadata that filename parsing may miss.
+type ImportHints struct {
+	TmdbID        int
+	Title         string
+	Year          int
+	SeasonNumber  int
+	EpisodeNumber int
 }
 
 type Config struct {
@@ -73,6 +86,7 @@ type Config struct {
 	GRPCAddr         string
 	LibraryRoot      string
 	TVLibraryRoot    string
+	MusicLibraryRoot string
 	DefaultWatchDir  string
 	ImportMode       string
 	SampleMaxBytes   int64
@@ -116,6 +130,9 @@ func NewModule(cfg Config) *Module {
 	}
 	if v := os.Getenv("SCANNER_TV_LIBRARY_ROOT"); v != "" {
 		cfg.TVLibraryRoot = v
+	}
+	if v := os.Getenv("SCANNER_MUSIC_LIBRARY_ROOT"); v != "" {
+		cfg.MusicLibraryRoot = v
 	}
 	if v := os.Getenv("SCANNER_DEFAULT_WATCH_DIR"); v != "" {
 		cfg.DefaultWatchDir = v
@@ -169,19 +186,20 @@ func NewModule(cfg Config) *Module {
 		}
 	}
 	return &Module{
-		id:              cfg.ID,
-		dbPath:          cfg.DBPath,
-		grpcAddr:        cfg.GRPCAddr,
-		libraryRoot:     cfg.LibraryRoot,
-		tvLibraryRoot:   cfg.TVLibraryRoot,
-		defaultWatchDir: cfg.DefaultWatchDir,
-		importMode:      normalizeImportMode(cfg.ImportMode),
-		sampleMaxBytes:  cfg.SampleMaxBytes,
-		minVideoBytes:   minVideo,
-		debounceWait:    debounceWait,
-		safetyRescan:    safetyRescan,
-		initialDelay:    initialDelay,
-		useMeshStorage:  cfg.UseMeshStorage,
+		id:               cfg.ID,
+		dbPath:           cfg.DBPath,
+		grpcAddr:         cfg.GRPCAddr,
+		libraryRoot:      cfg.LibraryRoot,
+		tvLibraryRoot:    cfg.TVLibraryRoot,
+		musicLibraryRoot: cfg.MusicLibraryRoot,
+		defaultWatchDir:  cfg.DefaultWatchDir,
+		importMode:       normalizeImportMode(cfg.ImportMode),
+		sampleMaxBytes:   cfg.SampleMaxBytes,
+		minVideoBytes:    minVideo,
+		debounceWait:     debounceWait,
+		safetyRescan:     safetyRescan,
+		initialDelay:     initialDelay,
+		useMeshStorage:   cfg.UseMeshStorage,
 	}
 }
 
@@ -189,7 +207,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.25",
+		Version:        "0.1.26",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -414,7 +432,7 @@ func (m *Module) runScan() {
 
 	var totalFound, totalImported, totalSkipped int
 	for _, d := range dirs {
-		found, imported, skipped := m.scanDirectory(d.path, d.mediaType, d.libPath, d.tvLibPath)
+		found, imported, skipped, _ := m.scanDirectory(context.Background(), d.path, d.mediaType, d.libPath, d.tvLibPath, false)
 		totalFound += found
 		totalImported += imported
 		totalSkipped += skipped
@@ -466,19 +484,28 @@ func (m *Module) collectWatchDirs() []watchDirEntry {
 	return dirs
 }
 
-func (m *Module) scanDirectory(watchPath, mediaType, libPath, tvLibPath string) (found, imported, skipped int) {
-	entries, err := os.ReadDir(watchPath)
-	if err != nil {
-		slog.Warn("cannot read directory", "path", watchPath, "error", err)
-		return 0, 0, 0
+func (m *Module) scanDirectory(ctx context.Context, watchPath, mediaType, libPath, tvLibPath string, satisfiedIfAlreadyImported bool) (found, imported, skipped int, err error) {
+	if err := importPathCheckCtx(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+	entries, readErr := os.ReadDir(watchPath)
+	if readErr != nil {
+		slog.Warn("cannot read directory", "path", watchPath, "error", readErr)
+		return 0, 0, 0, nil
 	}
 
 	for _, entry := range entries {
+		if err := importPathCheckCtx(ctx); err != nil {
+			return found, imported, skipped, err
+		}
 		if entry.IsDir() {
 			if skipBonusDir(entry.Name()) {
 				continue
 			}
-			subFound, subImported, subSkipped := m.scanDirectory(filepath.Join(watchPath, entry.Name()), mediaType, libPath, tvLibPath)
+			subFound, subImported, subSkipped, err := m.scanDirectory(ctx, filepath.Join(watchPath, entry.Name()), mediaType, libPath, tvLibPath, satisfiedIfAlreadyImported)
+			if err != nil {
+				return found, imported, skipped, err
+			}
 			found += subFound
 			imported += subImported
 			skipped += subSkipped
@@ -498,7 +525,10 @@ func (m *Module) scanDirectory(watchPath, mediaType, libPath, tvLibPath string) 
 				continue
 			}
 			if dest != "" {
-				subFound, subImported, subSkipped := m.scanDirectory(dest, mediaType, libPath, tvLibPath)
+				subFound, subImported, subSkipped, err := m.scanDirectory(ctx, dest, mediaType, libPath, tvLibPath, satisfiedIfAlreadyImported)
+				if err != nil {
+					return found, imported, skipped, err
+				}
 				found += subFound
 				imported += subImported
 				skipped += subSkipped
@@ -506,14 +536,18 @@ func (m *Module) scanDirectory(watchPath, mediaType, libPath, tvLibPath string) 
 			continue
 		}
 
-		if !isMediaExt(ext) {
+		if !isImportableExt(ext) {
 			continue
 		}
 
 		found++
 
 		if m.isAlreadyImported(fullPath) {
-			skipped++
+			if satisfiedIfAlreadyImported {
+				imported++
+			} else {
+				skipped++
+			}
 			continue
 		}
 
@@ -534,7 +568,7 @@ func (m *Module) scanDirectory(watchPath, mediaType, libPath, tvLibPath string) 
 			skipped++
 		}
 	}
-	return
+	return found, imported, skipped, nil
 }
 
 func isMediaExt(ext string) bool {
@@ -557,6 +591,9 @@ func (m *Module) isAlreadyImported(path string) bool {
 
 func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath string) bool {
 	ext := strings.ToLower(filepath.Ext(fileName))
+	if isAudioExt(ext) {
+		return m.importMusicFile(fullPath, fileName, mediaType, libPath)
+	}
 	if !isMediaExt(ext) {
 		slog.Debug("skipping non-media file", "file", fileName)
 		return false
@@ -576,10 +613,13 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 
 	parsed := parseFileName(fileName)
 	enrichParsedFromPath(&parsed, fullPath)
+	applyImportHints(&parsed, m.importHints)
 	if parsed.MediaType == "other" {
 		switch {
 		case mediaType == "tv" || looksLikeTVName(fileName) || looksLikeTVName(fullPath):
 			parsed.MediaType = "tv"
+		case mediaType == "music" || mediaType == "audio":
+			parsed.MediaType = "music"
 		case mediaType == "movie" || parsed.Year > 0:
 			parsed.MediaType = "movie"
 		}
@@ -676,7 +716,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 	if _, err := os.Stat(analyzePath); err != nil {
 		analyzePath = fullPath
 	}
-	if q := m.probeQuality(analyzePath); q != "" {
+	if q := m.probeQuality(context.Background(), analyzePath); q != "" {
 		quality = q
 	}
 
@@ -933,6 +973,15 @@ func (m *Module) markStoragePutFailed(key string) {
 }
 
 func (m *Module) destRootFor(parsed parsedFile, libPath, tvLibPath string) string {
+	if parsed.MediaType == "music" {
+		music := strings.TrimSpace(m.musicLibraryRoot)
+		if music == "" {
+			music = m.musicLibraryRootFor(libPath)
+		}
+		if music != "" {
+			return music
+		}
+	}
 	if parsed.MediaType == "tv" {
 		tv := strings.TrimSpace(tvLibPath)
 		if tv == "" {
@@ -980,6 +1029,13 @@ func libraryKindPrefix(root, mediaType string) string {
 			}
 		}
 		return "TV"
+	case "music":
+		for _, n := range musicLibraryDirNames {
+			if base == strings.ToLower(n) {
+				return ""
+			}
+		}
+		return "Music"
 	default:
 		return "Other"
 	}
@@ -988,6 +1044,9 @@ func libraryKindPrefix(root, mediaType string) string {
 func (m *Module) resolveImportPaths(parsed parsedFile, libPath, tvLibPath, fullPath string) (storageKey, destPath string) {
 	storageKey = m.buildStorageKey(parsed)
 	destPath = m.buildDestPath(parsed, libPath, tvLibPath)
+	if parsed.MediaType == "music" {
+		return storageKey, destPath
+	}
 	tplID := m.namingTemplateForLibPath(m.destRootFor(parsed, libPath, tvLibPath))
 	if preview := m.previewRename(fullPath, parsed, tplID); preview != nil && preview.GetNewPath() != "" {
 		root := m.destRootFor(parsed, libPath, tvLibPath)
@@ -1200,12 +1259,16 @@ func (m *Module) lookupEpisodeRenameMeta(ctx context.Context, parsed parsedFile)
 	return resp
 }
 
-func (m *Module) probeQuality(path string) string {
+func (m *Module) probeQuality(ctx context.Context, path string) string {
 	if path == "" {
 		return ""
 	}
-	ctx := context.Background()
-	addr, err := m.findCapabilityAddr(ctx, "media.analyzer")
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	addr, err := m.findCapabilityAddr(probeCtx, "media.analyzer")
 	if err != nil {
 		return ""
 	}
@@ -1215,7 +1278,7 @@ func (m *Module) probeQuality(path string) string {
 	}
 	defer conn.Close()
 	cli := ffprobev1.NewAnalysisServiceClient(conn)
-	resp, err := cli.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: path})
+	resp, err := cli.Analyze(probeCtx, &ffprobev1.AnalyzeRequest{FilePath: path})
 	if err != nil {
 		slog.Debug("ffprobe analyze failed", "path", path, "error", err)
 		return ""
@@ -1411,6 +1474,8 @@ func (m *Module) buildStorageKey(p parsedFile) string {
 	safeTitle := sanitizeName(p.Title)
 	ext := filepath.Ext(p.FileName)
 	switch p.MediaType {
+	case "music":
+		return buildMusicStorageKey(p)
 	case "movie":
 		yearStr := ""
 		if p.Year > 0 {
@@ -1454,6 +1519,8 @@ func (m *Module) buildDestPath(p parsedFile, libPath, tvLibPath string) string {
 	}
 
 	switch p.MediaType {
+	case "music":
+		return buildMusicDestPath(p, root)
 	case "movie":
 		yearStr := ""
 		if p.Year > 0 {
@@ -1512,6 +1579,8 @@ var (
 type parsedFile struct {
 	FileName       string
 	Title          string
+	Artist         string
+	Album          string
 	Year           int
 	Season         int
 	Episode        int
@@ -1702,6 +1771,47 @@ func enrichParsedFromPath(parsed *parsedFile, fullPath string) {
 	if parsed.MediaType == "other" && fromDir.MediaType != "" {
 		parsed.MediaType = fromDir.MediaType
 	}
+}
+
+func applyImportHints(parsed *parsedFile, hints *ImportHints) {
+	if parsed == nil || hints == nil {
+		return
+	}
+	if hints.TmdbID > 0 && parsed.TMDBID == 0 {
+		parsed.TMDBID = hints.TmdbID
+	}
+	if hints.Title != "" {
+		if parsed.Title == "" || (hints.TmdbID > 0 && parsed.TMDBID == hints.TmdbID) {
+			parsed.Title = hints.Title
+		}
+	}
+	if hints.Year > 0 && parsed.Year == 0 {
+		parsed.Year = hints.Year
+	}
+	if hints.SeasonNumber > 0 && parsed.Season == 0 {
+		parsed.Season = hints.SeasonNumber
+	}
+	if hints.EpisodeNumber > 0 && parsed.Episode == 0 && len(parsed.Episodes) == 0 {
+		parsed.Episode = hints.EpisodeNumber
+		parsed.Episodes = []int{hints.EpisodeNumber}
+	}
+}
+
+func importHintsFromRequest(req *scannerv1.ImportPathRequest) *ImportHints {
+	if req == nil {
+		return nil
+	}
+	h := &ImportHints{
+		TmdbID:        int(req.GetTmdbId()),
+		Title:         strings.TrimSpace(req.GetTitle()),
+		Year:          int(req.GetYear()),
+		SeasonNumber:  int(req.GetSeasonNumber()),
+		EpisodeNumber: int(req.GetEpisodeNumber()),
+	}
+	if h.TmdbID == 0 && h.Title == "" && h.Year == 0 && h.SeasonNumber == 0 && h.EpisodeNumber == 0 {
+		return nil
+	}
+	return h
 }
 
 func looksLikeBareEpisodeFile(fileName string) bool {
@@ -2005,7 +2115,7 @@ func (m *Module) Scan(ctx context.Context, req *scannerv1.ScanRequest) (*scanner
 
 	var totalFound, totalImported, totalSkipped int
 	for _, d := range dirs {
-		found, imported, skipped := m.scanDirectory(d.path, d.mediaType, d.libPath, d.tvLibPath)
+		found, imported, skipped, _ := m.scanDirectory(context.Background(), d.path, d.mediaType, d.libPath, d.tvLibPath, false)
 		totalFound += found
 		totalImported += imported
 		totalSkipped += skipped
@@ -2019,6 +2129,9 @@ func (m *Module) Scan(ctx context.Context, req *scannerv1.ScanRequest) (*scanner
 }
 
 func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathRequest) (*scannerv1.ImportPathResponse, error) {
+	if err := importPathCheckCtx(ctx); err != nil {
+		return nil, err
+	}
 	path := strings.TrimSpace(req.GetPath())
 	if path == "" {
 		return nil, fmt.Errorf("path is required")
@@ -2035,41 +2148,78 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 		return nil, fmt.Errorf("not initialized")
 	}
 
+	unresolvedRel := ""
 	if !filepath.IsAbs(path) {
 		orig := path
 		if resolved, ok := resolveRelativeWatchPath(dirs, path); ok {
 			slog.Info("ImportPath resolved relative path", "from", orig, "to", resolved)
 			path = resolved
 		} else {
+			unresolvedRel = orig
 			slog.Info("ImportPath relative path unresolved", "path", orig)
 		}
 	}
 
 	d, ok := deepestWatchDir(dirs, path)
 	if !ok {
-		return nil, fmt.Errorf("path %q is not under any registered watch directory", path)
+		return nil, importPathWatchDirError(path, unresolvedRel, dirs)
 	}
 
 	m.scanMu.Lock()
 	defer m.scanMu.Unlock()
 
-	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
-		found, imported, skipped := 1, 0, 0
-		if m.isAlreadyImported(path) {
-			skipped = 1
-		} else if m.importFile(path, filepath.Base(path), d.mediaType, d.libPath, d.tvLibPath) {
-			imported = 1
-		} else {
-			skipped = 1
-		}
-		return &scannerv1.ImportPathResponse{
-			FilesFound:    int32(found),
-			FilesImported: int32(imported),
-			FilesSkipped:  int32(skipped),
-		}, nil
+	m.importHints = importHintsFromRequest(req)
+	defer func() { m.importHints = nil }()
+
+	if err := importPathCheckCtx(ctx); err != nil {
+		return nil, err
 	}
 
-	found, imported, skipped := m.scanDirectory(path, d.mediaType, d.libPath, d.tvLibPath)
+	fi, statErr := os.Stat(path)
+	if statErr != nil {
+		if m.isAlreadyImported(path) {
+			return &scannerv1.ImportPathResponse{
+				FilesFound:    1,
+				FilesImported: 1,
+				FilesSkipped:  0,
+			}, nil
+		}
+		return nil, fmt.Errorf("import path %q: %w", path, statErr)
+	}
+
+	if !fi.IsDir() {
+		ext := strings.ToLower(filepath.Ext(path))
+		if !isImportableExt(ext) {
+			return &scannerv1.ImportPathResponse{
+				FilesFound:    0,
+				FilesImported: 0,
+				FilesSkipped:  1,
+			}, nil
+		}
+		if m.isAlreadyImported(path) {
+			return &scannerv1.ImportPathResponse{
+				FilesFound:    1,
+				FilesImported: 1,
+				FilesSkipped:  0,
+			}, nil
+		}
+		if m.importFile(path, filepath.Base(path), d.mediaType, d.libPath, d.tvLibPath) {
+			return &scannerv1.ImportPathResponse{
+				FilesFound:    1,
+				FilesImported: 1,
+				FilesSkipped:  0,
+			}, nil
+		}
+		return nil, importPathSingleFileError(path)
+	}
+
+	found, imported, skipped, err := m.scanDirectory(ctx, path, d.mediaType, d.libPath, d.tvLibPath, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := importPathZeroImportedError(path, found, imported, skipped); err != nil {
+		return nil, err
+	}
 	return &scannerv1.ImportPathResponse{
 		FilesFound:    int32(found),
 		FilesImported: int32(imported),
@@ -2142,7 +2292,7 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 		found++
 		srcURI := "storage://" + k
 		if m.isAlreadyImported(srcURI) {
-			skipped++
+			imported++
 			continue
 		}
 		base := filepath.Base(k)
@@ -2151,6 +2301,9 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 		} else {
 			skipped++
 		}
+	}
+	if err := importPathZeroImportedError(uri, found, imported, skipped); err != nil {
+		return nil, err
 	}
 	return &scannerv1.ImportPathResponse{
 		FilesFound:    int32(found),
@@ -2576,7 +2729,7 @@ func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool 
 	}
 
 	quality := parsed.Quality
-	if q := m.probeQuality(fullPath); q != "" {
+	if q := m.probeQuality(context.Background(), fullPath); q != "" {
 		quality = q
 	}
 

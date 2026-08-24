@@ -101,6 +101,12 @@ message ImportedFile {
 
 message ImportPathRequest {
   string path = 1;
+  // Optional acquisition hints from media-automation (wanted item / queue row).
+  int32 tmdb_id = 2;
+  string title = 3;
+  int32 year = 4;
+  int32 season_number = 5;
+  int32 episode_number = 6;
 }
 
 message ImportPathResponse {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	scannerv1 "github.com/Muxcore-Media/media-scanner/proto/scannerv1"
+	scannerv1 "github.com/Muxcore-Media/contracts-scanner/muxcore/scanner/v1"
 )
 
 func newTestModule(t *testing.T) *Module {
@@ -392,7 +392,10 @@ func TestScanDirectory(t *testing.T) {
 		os.WriteFile(filepath.Join(srcDir, f), []byte(f), 0644)
 	}
 
-	found, imported, skipped := m.scanDirectory(srcDir, "both", libDir, "")
+	found, imported, skipped, err := m.scanDirectory(context.Background(), srcDir, "both", libDir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if found != 3 {
 		t.Errorf("expected 3 media files found, got %d", found)
 	}
@@ -404,7 +407,10 @@ func TestScanDirectory(t *testing.T) {
 	}
 
 	// Second scan: files were moved away, so nothing to find
-	found2, imported2, skipped2 := m.scanDirectory(srcDir, "both", libDir, "")
+	found2, imported2, skipped2, err := m.scanDirectory(context.Background(), srcDir, "both", libDir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if found2 != 0 {
 		t.Errorf("expected 0 found on second scan (files moved), got %d", found2)
 	}
@@ -947,7 +953,10 @@ func TestScanSkipsExtrasDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	found, imported, _ := m.scanDirectory(srcDir, "tv", libDir, "")
+	found, imported, _, err := m.scanDirectory(context.Background(), srcDir, "tv", libDir, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if found != 1 {
 		t.Fatalf("found=%d want 1 (extras dir skipped)", found)
 	}
