@@ -19,10 +19,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	scannerv1 "github.com/Muxcore-Media/contracts-scanner/muxcore/scanner/v1"
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
 	renamev1 "github.com/Muxcore-Media/media-rename/proto/renamev1"
-	scannerv1 "github.com/Muxcore-Media/contracts-scanner/muxcore/scanner/v1"
-	subtv1 "github.com/Muxcore-Media/media-subtitles/proto/subtv1"
 	tvmgmtv1 "github.com/Muxcore-Media/media-tvshows/proto/tvmgmtv1"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
@@ -230,7 +229,7 @@ func (m *Module) Init(ctx context.Context) error {
 	db.SetMaxOpenConns(1)
 
 	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("enable WAL: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -244,12 +243,12 @@ func (m *Module) Init(ctx context.Context) error {
 			created_at      TEXT NOT NULL
 		)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create watch_dirs table: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `ALTER TABLE watch_dirs ADD COLUMN tv_library_path TEXT NOT NULL DEFAULT ''`); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-			db.Close()
+			_ = db.Close()
 			return fmt.Errorf("add watch_dirs.tv_library_path: %w", err)
 		}
 	}
@@ -270,7 +269,7 @@ func (m *Module) Init(ctx context.Context) error {
 			status           TEXT DEFAULT 'imported'
 		)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create imported_files table: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -284,13 +283,13 @@ func (m *Module) Init(ctx context.Context) error {
 			status         TEXT DEFAULT 'running'
 		)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create scan_log table: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_imported_type ON imported_files(media_type, status)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create imported index: %w", err)
 	}
 
@@ -303,10 +302,10 @@ func (m *Module) Init(ctx context.Context) error {
 		watchID := fmt.Sprintf("auto_watch_%d", time.Now().UnixNano())
 		libPath := m.libraryRoot
 		tvPath := m.tvLibraryRoot
-		m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, tv_library_path, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+		_, _ = m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, tv_library_path, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
 			watchID, m.defaultWatchDir, "both", libPath, tvPath, time.Now().UTC().Format(time.RFC3339),
 		)
-		m.db.Exec(`UPDATE watch_dirs SET library_path = CASE WHEN IFNULL(library_path,'') = '' THEN ? ELSE library_path END, tv_library_path = CASE WHEN IFNULL(tv_library_path,'') = '' THEN ? ELSE tv_library_path END, media_type = CASE WHEN IFNULL(media_type,'') = '' THEN 'both' ELSE media_type END WHERE path = ?`,
+		_, _ = m.db.Exec(`UPDATE watch_dirs SET library_path = CASE WHEN IFNULL(library_path,'') = '' THEN ? ELSE library_path END, tv_library_path = CASE WHEN IFNULL(tv_library_path,'') = '' THEN ? ELSE tv_library_path END, media_type = CASE WHEN IFNULL(media_type,'') = '' THEN 'both' ELSE media_type END WHERE path = ?`,
 			libPath, tvPath, m.defaultWatchDir,
 		)
 		slog.Info("auto-registered watch dir", "path", m.defaultWatchDir, "movies", libPath, "tv", tvPath)
@@ -314,7 +313,7 @@ func (m *Module) Init(ctx context.Context) error {
 
 	lis, err := net.Listen("tcp", m.grpcAddr)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("listen gRPC %s: %w", m.grpcAddr, err)
 	}
 	m.grpcLis = lis
@@ -354,11 +353,11 @@ func (m *Module) Stop(ctx context.Context) error {
 		m.grpcSrv.GracefulStop()
 	}
 	if m.mc != nil {
-		m.mc.Close()
+		_ = m.mc.Close()
 	}
 	m.mu.Lock()
 	if m.db != nil {
-		m.db.Close()
+		_ = m.db.Close()
 		m.db = nil
 	}
 	m.mu.Unlock()
@@ -428,7 +427,7 @@ func (m *Module) runScan() {
 
 	logID := fmt.Sprintf("scan_%d", time.Now().UnixNano())
 	startedAt := time.Now().UTC().Format(time.RFC3339)
-	db.Exec(`INSERT INTO scan_log (id, started_at, status) VALUES (?, ?, 'running')`, logID, startedAt)
+	_, _ = db.Exec(`INSERT INTO scan_log (id, started_at, status) VALUES (?, ?, 'running')`, logID, startedAt)
 
 	var totalFound, totalImported, totalSkipped int
 	for _, d := range dirs {
@@ -439,7 +438,7 @@ func (m *Module) runScan() {
 	}
 
 	completedAt := time.Now().UTC().Format(time.RFC3339)
-	db.Exec(`UPDATE scan_log SET completed_at = ?, files_found = ?, files_imported = ?, files_skipped = ?, status = 'completed' WHERE id = ?`,
+	_, _ = db.Exec(`UPDATE scan_log SET completed_at = ?, files_found = ?, files_imported = ?, files_skipped = ?, status = 'completed' WHERE id = ?`,
 		completedAt, totalFound, totalImported, totalSkipped, logID)
 
 	if totalFound > 0 {
@@ -467,7 +466,7 @@ func (m *Module) collectWatchDirs() []watchDirEntry {
 		slog.Error("query watch dirs", "error", err)
 		return nil
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var dirs []watchDirEntry
 	for rows.Next() {
@@ -582,7 +581,7 @@ func isMediaExt(ext string) bool {
 func (m *Module) isAlreadyImported(path string) bool {
 	var count int
 	m.mu.RLock()
-	m.db.QueryRow(`SELECT COUNT(*) FROM imported_files WHERE original_path = ? OR destination_path = ?`, path, path).Scan(&count)
+	_ = m.db.QueryRow(`SELECT COUNT(*) FROM imported_files WHERE original_path = ? OR destination_path = ?`, path, path).Scan(&count)
 	m.mu.RUnlock()
 	return count > 0
 }
@@ -676,12 +675,12 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 			return false
 		}
 		if err := m.mc.Storage.Put(context.Background(), storageKey, f); err != nil {
-			f.Close()
+			_ = f.Close()
 			m.markStoragePutFailed(storageKey)
 			slog.Warn("storage put failed; falling back to local import",
 				"key", storageKey, "error", err, "mode", m.importMode)
 		} else {
-			f.Close()
+			_ = f.Close()
 			usedStorage = true
 			if err := os.Remove(fullPath); err != nil {
 				slog.Debug("remove source after storage put", "src", fullPath, "error", err)
@@ -724,7 +723,7 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 
 	if m.importMode == "move" {
 		if _, err := os.Stat(fullPath); err == nil {
-			os.Remove(fullPath)
+			_ = os.Remove(fullPath)
 		}
 	}
 
@@ -1112,7 +1111,7 @@ func (m *Module) previewRename(fullPath string, parsed parsedFile, templateID st
 	if err != nil {
 		return nil
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	cli := renamev1.NewRenameServiceClient(conn)
 
 	edition, group := parseEditionAndGroup(parsed.FileName)
@@ -1199,7 +1198,7 @@ func (m *Module) probeRenameMeta(path string) *renameProbeMeta {
 	if err != nil {
 		return nil
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	cli := ffprobev1.NewAnalysisServiceClient(conn)
 	resp, err := cli.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: path})
 	if err != nil || resp.GetError() != "" {
@@ -1240,7 +1239,7 @@ func (m *Module) lookupEpisodeRenameMeta(ctx context.Context, parsed parsedFile)
 	if err != nil {
 		return nil
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	cli := tvmgmtv1.NewTvManagementServiceClient(conn)
 	resp, err := cli.LookupEpisode(ctx, &tvmgmtv1.LookupEpisodeRequest{
 		TmdbId:         int32(parsed.TMDBID),
@@ -1276,7 +1275,7 @@ func (m *Module) probeQuality(ctx context.Context, path string) string {
 	if err != nil {
 		return ""
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	cli := ffprobev1.NewAnalysisServiceClient(conn)
 	resp, err := cli.Analyze(probeCtx, &ffprobev1.AnalyzeRequest{FilePath: path})
 	if err != nil {
@@ -1385,45 +1384,11 @@ func (m *Module) importSidecarSubtitles(srcVideo, destVideo, storageKey string) 
 				if err := m.mc.Storage.Put(context.Background(), subKey, f); err != nil {
 					slog.Debug("storage put subtitle failed", "key", subKey, "error", err)
 				}
-				f.Close()
+				_ = f.Close()
 			}
 		}
-		os.Remove(srcSub)
+		_ = os.Remove(srcSub)
 		slog.Info("imported sidecar subtitle", "src", srcSub, "dest", destSub)
-	}
-}
-
-func (m *Module) registerSidecarSubtitle(mediaFileID, filePath string) {
-	if mediaFileID == "" || filePath == "" {
-		return
-	}
-	if _, err := os.Stat(filePath); err != nil {
-		return
-	}
-	ctx := context.Background()
-	addr, err := m.findCapabilityAddr(ctx, "media.subtitles")
-	if err != nil {
-		return
-	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	cli := subtv1.NewSubtitleServiceClient(conn)
-	resp, err := cli.RegisterSidecar(ctx, &subtv1.RegisterSidecarRequest{
-		MediaFileId: mediaFileID,
-		FilePath:    filePath,
-	})
-	if err != nil {
-		slog.Debug("register sidecar failed", "path", filePath, "error", err)
-		return
-	}
-	if resp.GetAlreadyRegistered() {
-		return
-	}
-	if sub := resp.GetSubtitle(); sub != nil {
-		slog.Info("registered sidecar subtitle", "id", sub.GetId(), "lang", sub.GetLanguage(), "media", mediaFileID)
 	}
 }
 
@@ -1432,42 +1397,14 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 	_, err = io.Copy(out, in)
 	return err
-}
-
-func (m *Module) detectEmbeddedSubtitles(path string) {
-	if path == "" {
-		return
-	}
-	if _, err := os.Stat(path); err != nil {
-		return
-	}
-	ctx := context.Background()
-	addr, err := m.findCapabilityAddr(ctx, "media.subtitles")
-	if err != nil {
-		return
-	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-	cli := subtv1.NewSubtitleServiceClient(conn)
-	resp, err := cli.DetectEmbedded(ctx, &subtv1.DetectEmbeddedRequest{FilePath: path})
-	if err != nil {
-		slog.Debug("detect embedded subtitles failed", "path", path, "error", err)
-		return
-	}
-	if n := len(resp.GetSubtitles()); n > 0 {
-		slog.Info("detected embedded subtitles", "path", path, "count", n)
-	}
 }
 
 func (m *Module) buildStorageKey(p parsedFile) string {
@@ -2667,7 +2604,7 @@ func (m *Module) collectLibraryRoots() []string {
 	}
 	rows, err := m.db.Query(`SELECT DISTINCT library_path FROM watch_dirs WHERE library_path != ''`)
 	if err == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var p string
 			if rows.Scan(&p) == nil {
@@ -2736,7 +2673,7 @@ func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool 
 	now := time.Now().UTC().Format(time.RFC3339)
 	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
 	m.mu.Lock()
-	m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
+	_, _ = m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
 		importID, fullPath, fullPath, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
 	)
 	m.mu.Unlock()
@@ -2769,8 +2706,8 @@ func (m *Module) GetStats(ctx context.Context, req *scannerv1.GetStatsRequest) (
 	}
 
 	var totalImported, watchDirs int
-	db.QueryRow(`SELECT COUNT(*) FROM imported_files WHERE status = 'imported'`).Scan(&totalImported)
-	db.QueryRow(`SELECT COUNT(*) FROM watch_dirs WHERE enabled = 1`).Scan(&watchDirs)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM imported_files WHERE status = 'imported'`).Scan(&totalImported)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM watch_dirs WHERE enabled = 1`).Scan(&watchDirs)
 
 	var lastScanAt int64
 	var lastStatus string
@@ -2845,7 +2782,7 @@ func (m *Module) ListWatchDirs(ctx context.Context, req *scannerv1.ListWatchDirs
 	if err != nil {
 		return nil, fmt.Errorf("query watch dirs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var dirs []*scannerv1.WatchDir
 	for rows.Next() {
@@ -2944,7 +2881,7 @@ func (m *Module) ListImported(ctx context.Context, req *scannerv1.ListImportedRe
 	}
 
 	var total int
-	m.db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
+	_ = m.db.QueryRowContext(ctx, countQuery, args...).Scan(&total)
 	query += ` ORDER BY imported_at DESC LIMIT ? OFFSET ?`
 	qargs := append(args, pageSize, offset)
 
@@ -2952,7 +2889,7 @@ func (m *Module) ListImported(ctx context.Context, req *scannerv1.ListImportedRe
 	if err != nil {
 		return nil, fmt.Errorf("query imported: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var files []*scannerv1.ImportedFile
 	for rows.Next() {
