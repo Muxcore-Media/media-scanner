@@ -3,6 +3,7 @@ module github.com/Muxcore-Media/media-scanner
 go 1.26.4
 
 require (
+	github.com/Muxcore-Media/contracts-media v0.1.0
 	github.com/Muxcore-Media/contracts-scanner v0.1.0
 	github.com/Muxcore-Media/core v0.5.8
 	github.com/Muxcore-Media/core/pkg/contracts v0.5.8
@@ -10,7 +11,6 @@ require (
 	github.com/Muxcore-Media/core/sdk/go/module v0.5.8
 	github.com/Muxcore-Media/media-ffprobe v0.1.1
 	github.com/Muxcore-Media/media-rename v0.2.1
-	github.com/Muxcore-Media/media-subtitles v0.4.1
 	github.com/Muxcore-Media/media-tvshows v0.1.9
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/nwaples/rardecode/v2 v2.3.0
@@ -19,10 +19,7 @@ require (
 	modernc.org/sqlite v1.55.0
 )
 
-require (
-	github.com/Muxcore-Media/contracts-media v0.1.0 // indirect
-	github.com/Muxcore-Media/core/pkg/tenant v0.5.8 // indirect
-)
+require github.com/Muxcore-Media/core/pkg/tenant v0.5.8 // indirect
 
 require (
 	github.com/Muxcore-Media/media-root-folders v0.1.1
@@ -39,6 +36,8 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/Muxcore-Media/contracts-media => ../contracts-media
 
 replace github.com/Muxcore-Media/contracts-scanner => ../contracts-scanner
 

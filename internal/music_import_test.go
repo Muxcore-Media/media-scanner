@@ -76,7 +76,7 @@ func TestImportMusicFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = m.Stop(ctx) })
 
-	if !m.importMusicFile(src, filepath.Base(src), "music", m.libraryRoot) {
+	if !m.importMusicFile(src, filepath.Base(src), src, "music", m.libraryRoot) {
 		t.Fatal("importMusicFile returned false")
 	}
 

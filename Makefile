@@ -26,7 +26,9 @@ tidy:
 	$(GO) mod tidy
 
 proto:
-	PATH="$$HOME/go/bin:$$PATH" protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative proto/scannerv1/scanner.proto
+	PATH="$$HOME/go/bin:$$PATH" protoc --go_out=../contracts-scanner/muxcore/scanner/v1 --go_opt=paths=source_relative \
+	  --go-grpc_out=../contracts-scanner/muxcore/scanner/v1 --go-grpc_opt=paths=source_relative \
+	  -I ../contracts-scanner/proto ../contracts-scanner/proto/muxcore/scanner/v1/scanner.proto
 
 docker:
 	docker build -t ghcr.io/muxcore-media/$(BINARY):$(VERSION) .

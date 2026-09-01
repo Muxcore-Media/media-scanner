@@ -2,6 +2,7 @@ package internal
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -139,5 +140,64 @@ func TestArchiveUnstableSkipped(t *testing.T) {
 	}
 	if dest != "" {
 		t.Fatal("unstable archive should not extract yet")
+	}
+}
+
+func writeEncryptedZip(t *testing.T, path string) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	hdr := &zip.FileHeader{Name: "secret.txt", Method: zip.Store, Flags: 0x1}
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("nope")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-5 * time.Second)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtractZipEncryptedRejected(t *testing.T) {
+	m := newTestModule(t)
+	zipPath := filepath.Join(t.TempDir(), "locked.zip")
+	writeEncryptedZip(t, zipPath)
+	_, err := m.maybeExtractArchive(zipPath)
+	if err == nil {
+		t.Fatal("expected encrypted zip rejection")
+	}
+	if !strings.Contains(err.Error(), "password-protected") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExtractZipSizeCap(t *testing.T) {
+	prev := maxArchiveExtractBytes
+	maxArchiveExtractBytes = 1 << 20 // 1 MiB for test
+	t.Cleanup(func() { maxArchiveExtractBytes = prev })
+
+	m := newTestModule(t)
+	tmp := t.TempDir()
+	zipPath := filepath.Join(tmp, "big.zip")
+	body := make([]byte, 600<<10) // 600 KiB each; two files exceed 1 MiB cap
+	writeTestZip(t, zipPath, map[string][]byte{
+		"a.bin": body,
+		"b.bin": body,
+	})
+	_, err := m.maybeExtractArchive(zipPath)
+	if err == nil {
+		t.Fatal("expected extract size cap error")
+	}
+	if !strings.Contains(err.Error(), "max extract size") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

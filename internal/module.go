@@ -3,7 +3,6 @@ package internal
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -62,6 +61,8 @@ type Module struct {
 	scanMu        sync.Mutex
 
 	useMeshStorage bool
+
+	storageTestOverride meshStorage
 
 	putFailMu    sync.Mutex
 	putFailUntil map[string]time.Time
@@ -206,7 +207,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.26",
+		Version:        "0.1.27",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -292,10 +293,21 @@ func (m *Module) Init(ctx context.Context) error {
 		_ = db.Close()
 		return fmt.Errorf("create imported index: %w", err)
 	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS settings_kv (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		)
+	`); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("create settings_kv table: %w", err)
+	}
 
 	m.mu.Lock()
 	m.db = db
 	m.mu.Unlock()
+
+	m.loadPersistedSettings(ctx)
 
 	// Auto-register default watch directory if configured.
 	if m.defaultWatchDir != "" {
@@ -394,16 +406,6 @@ func (m *Module) dialCore(ctx context.Context) {
 	slog.Info("media-scanner: connected to core mesh", "addr", meshAddr)
 }
 
-func (m *Module) publish(ctx context.Context, eventType string, payload map[string]interface{}) {
-	if m.mc == nil {
-		return
-	}
-	data, _ := json.Marshal(payload)
-	if err := m.mc.Events.Publish(ctx, eventType, m.id, data); err != nil {
-		slog.Warn("publish event failed", "type", eventType, "error", err)
-	}
-}
-
 // ── Scan Loop ─────────────────────────────────────────────────
 
 func (m *Module) runScan() {
@@ -413,36 +415,29 @@ func (m *Module) runScan() {
 	}
 	defer m.scanMu.Unlock()
 
-	m.mu.RLock()
-	db := m.db
-	m.mu.RUnlock()
-	if db == nil {
+	stats, err := m.runLoggedScan(context.Background(), func(ctx context.Context) (int, int, int, error) {
+		dirs := m.collectWatchDirs()
+		if len(dirs) == 0 {
+			return 0, 0, 0, nil
+		}
+		var totalFound, totalImported, totalSkipped int
+		for _, d := range dirs {
+			found, imported, skipped, scanErr := m.scanDirectory(ctx, d.path, d.mediaType, d.libPath, d.tvLibPath, false)
+			if scanErr != nil {
+				return totalFound, totalImported, totalSkipped, scanErr
+			}
+			totalFound += found
+			totalImported += imported
+			totalSkipped += skipped
+		}
+		return totalFound, totalImported, totalSkipped, nil
+	})
+	if err != nil {
+		slog.Warn("scan failed", "error", err)
 		return
 	}
-
-	dirs := m.collectWatchDirs()
-	if len(dirs) == 0 {
-		return
-	}
-
-	logID := fmt.Sprintf("scan_%d", time.Now().UnixNano())
-	startedAt := time.Now().UTC().Format(time.RFC3339)
-	_, _ = db.Exec(`INSERT INTO scan_log (id, started_at, status) VALUES (?, ?, 'running')`, logID, startedAt)
-
-	var totalFound, totalImported, totalSkipped int
-	for _, d := range dirs {
-		found, imported, skipped, _ := m.scanDirectory(context.Background(), d.path, d.mediaType, d.libPath, d.tvLibPath, false)
-		totalFound += found
-		totalImported += imported
-		totalSkipped += skipped
-	}
-
-	completedAt := time.Now().UTC().Format(time.RFC3339)
-	_, _ = db.Exec(`UPDATE scan_log SET completed_at = ?, files_found = ?, files_imported = ?, files_skipped = ?, status = 'completed' WHERE id = ?`,
-		completedAt, totalFound, totalImported, totalSkipped, logID)
-
-	if totalFound > 0 {
-		slog.Info("scan complete", "found", totalFound, "imported", totalImported, "skipped", totalSkipped)
+	if stats.found > 0 {
+		slog.Info("scan complete", "found", stats.found, "imported", stats.imported, "skipped", stats.skipped)
 	}
 }
 
@@ -518,9 +513,10 @@ func (m *Module) scanDirectory(ctx context.Context, watchPath, mediaType, libPat
 			if !isFirst {
 				continue
 			}
-			dest, err := m.maybeExtractArchive(fullPath)
-			if err != nil {
-				slog.Warn("archive extract failed", "path", fullPath, "error", err)
+			dest, extractErr := m.maybeExtractArchive(fullPath)
+			if extractErr != nil {
+				slog.Warn("archive extract failed", "path", fullPath, "error", extractErr)
+				m.failImport(context.Background(), fullPath, extractErr.Error())
 				continue
 			}
 			if dest != "" {
@@ -554,13 +550,13 @@ func (m *Module) scanDirectory(ctx context.Context, watchPath, mediaType, libPat
 		if info, err := entry.Info(); err == nil {
 			size = info.Size()
 		}
-		if reason, reject := m.isSampleFile(entry.Name(), size); reject {
+		if reason, reject := m.rejectImportCandidate(entry.Name(), size, ext); reject {
 			slog.Info("skipping sample/junk file", "file", entry.Name(), "reason", reason, "size", size)
 			skipped++
 			continue
 		}
 
-		result := m.importFile(fullPath, entry.Name(), mediaType, libPath, tvLibPath)
+		result := m.importFile(fullPath, entry.Name(), fullPath, mediaType, libPath, tvLibPath)
 		if result {
 			imported++
 		} else {
@@ -588,10 +584,13 @@ func (m *Module) isAlreadyImported(path string) bool {
 
 // ── File Import ────────────────────────────────────────────────
 
-func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath string) bool {
+func (m *Module) importFile(fullPath, fileName, recordPath, mediaType, libPath, tvLibPath string) bool {
+	if recordPath == "" {
+		recordPath = fullPath
+	}
 	ext := strings.ToLower(filepath.Ext(fileName))
 	if isAudioExt(ext) {
-		return m.importMusicFile(fullPath, fileName, mediaType, libPath)
+		return m.importMusicFile(fullPath, fileName, recordPath, mediaType, libPath)
 	}
 	if !isMediaExt(ext) {
 		slog.Debug("skipping non-media file", "file", fileName)
@@ -646,13 +645,13 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 	if destKeepExisting(destPath, fullPath) {
 		slog.Info("skip import; destination already present",
 			"src", fileName, "dest", destPath, "storage_key", storageKey)
-		m.recordImported(fullPath, destPath, fileName, parsed, parsed.Quality)
+		m.recordImported(recordPath, destPath, fileName, parsed, parsed.Quality)
 		return true
 	}
 	if keep, reason, existing := shouldKeepExistingEpisode(destPath, fullPath, parsed); keep {
 		slog.Info("skip import; equal or better episode already in library",
 			"src", fileName, "existing", existing, "reason", reason)
-		m.recordImported(fullPath, existing, fileName, parsed, parsed.Quality)
+		m.recordImported(recordPath, existing, fileName, parsed, parsed.Quality)
 		return true
 	}
 
@@ -663,15 +662,12 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 			destExists = false
 		}
 	}
-	// Local library dest: copy/link on disk. Mesh Storage.Put EOFs on large files
-	// (vault remuxes) and then falls back anyway — skip the round-trip.
-	// Mesh Storage.Put EOFs on large files on this host. Local copy/link unless
-	// SCANNER_USE_MESH_STORAGE is explicitly enabled.
 	tryStorage := m.useMeshStorage && m.mc != nil && destPath == "" && !destExists && !m.storagePutCooling(storageKey)
 	if tryStorage {
 		f, err := os.Open(fullPath)
 		if err != nil {
 			slog.Error("open source file for storage put", "src", fullPath, "error", err)
+			m.failImport(context.Background(), recordPath, err.Error())
 			return false
 		}
 		if err := m.mc.Storage.Put(context.Background(), storageKey, f); err != nil {
@@ -695,10 +691,12 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 			destDir := filepath.Dir(destPath)
 			if err := os.MkdirAll(destDir, 0755); err != nil {
 				slog.Error("create destination directory", "path", destDir, "error", err)
+				m.failImport(context.Background(), recordPath, err.Error())
 				return false
 			}
 			if err := placeFile(fullPath, destPath, m.importMode); err != nil {
 				slog.Error("place file", "src", fullPath, "dst", destPath, "mode", m.importMode, "error", err)
+				m.failImport(context.Background(), recordPath, err.Error())
 				return false
 			}
 			removeWorseEpisodeCopies(destPath, parsed)
@@ -727,26 +725,11 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 		}
 	}
 
-	m.recordImported(fullPath, recordedDest, fileName, parsed, quality)
+	m.recordImported(recordPath, recordedDest, fileName, parsed, quality)
 
 	slog.Info("imported file", "src", fileName, "dest", recordedDest, "storage_key", storageKey, "type", parsed.MediaType, "title", parsed.Title, "mode", m.importMode)
 
-	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
-		"original_path":    fullPath,
-		"destination_path": recordedDest,
-		"storage_key":      storageKey,
-		"media_type":       parsed.MediaType,
-		"title":            parsed.Title,
-		"year":             parsed.Year,
-		"season_number":    parsed.Season,
-		"episode_number":   parsed.Episode,
-		"episode_numbers":  episodeNumbersInt32(parsed.Episodes, parsed.Episode),
-		"absolute_number":  parsed.AbsoluteNumber,
-		"air_date":         parsed.AirDate,
-		"season_pack":      parsed.SeasonPack,
-		"quality":          quality,
-		"tmdb_id":          parsed.TMDBID,
-	})
+	go m.publishFileImported(context.Background(), fileImportedPayloadFromParsed(recordPath, recordedDest, storageKey, quality, parsed))
 
 	return true
 }
@@ -942,15 +925,33 @@ func sameFilePath(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
 
-func (m *Module) recordImported(fullPath, destPath, fileName string, parsed parsedFile, quality string) {
-	if m.isAlreadyImported(fullPath) || (destPath != "" && m.isAlreadyImported(destPath)) {
+func (m *Module) recordImported(recordPath, destPath, fileName string, parsed parsedFile, quality string) {
+	if m.isAlreadyImported(recordPath) || (destPath != "" && m.isAlreadyImported(destPath)) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
 	m.mu.Lock()
 	_, _ = m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')`,
-		importID, fullPath, destPath, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
+		importID, recordPath, destPath, fileName, parsed.MediaType, parsed.Title, parsed.Year, parsed.Season, parsed.Episode, quality, parsed.TMDBID, now,
+	)
+	m.mu.Unlock()
+}
+
+func (m *Module) recordFailed(originalPath, reason string) {
+	if originalPath == "" {
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	importID := fmt.Sprintf("imp_%d", time.Now().UnixNano())
+	m.mu.Lock()
+	if m.db == nil {
+		m.mu.Unlock()
+		return
+	}
+	_, _ = m.db.Exec(`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, imported_at, status) VALUES (?, ?, '', '', '', ?, ?, 'failed')
+		ON CONFLICT(original_path) DO UPDATE SET imported_at = excluded.imported_at, status = 'failed', title = excluded.title`,
+		importID, originalPath, reason, now,
 	)
 	m.mu.Unlock()
 }
@@ -2045,23 +2046,34 @@ func existingTitleDir(root, kindPrefix, title string) string {
 // ── gRPC API ───────────────────────────────────────────────────
 
 func (m *Module) Scan(ctx context.Context, req *scannerv1.ScanRequest) (*scannerv1.ScanResponse, error) {
-	dirs := m.collectWatchDirs()
-	if dirs == nil {
-		return nil, fmt.Errorf("not initialized")
-	}
+	m.scanMu.Lock()
+	defer m.scanMu.Unlock()
 
-	var totalFound, totalImported, totalSkipped int
-	for _, d := range dirs {
-		found, imported, skipped, _ := m.scanDirectory(context.Background(), d.path, d.mediaType, d.libPath, d.tvLibPath, false)
-		totalFound += found
-		totalImported += imported
-		totalSkipped += skipped
+	stats, err := m.runLoggedScan(ctx, func(ctx context.Context) (int, int, int, error) {
+		dirs := m.collectWatchDirs()
+		if dirs == nil {
+			return 0, 0, 0, fmt.Errorf("not initialized")
+		}
+		var totalFound, totalImported, totalSkipped int
+		for _, d := range dirs {
+			found, imported, skipped, scanErr := m.scanDirectory(ctx, d.path, d.mediaType, d.libPath, d.tvLibPath, false)
+			if scanErr != nil {
+				return totalFound, totalImported, totalSkipped, scanErr
+			}
+			totalFound += found
+			totalImported += imported
+			totalSkipped += skipped
+		}
+		return totalFound, totalImported, totalSkipped, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return &scannerv1.ScanResponse{
-		FilesFound:    int32(totalFound),
-		FilesImported: int32(totalImported),
-		FilesSkipped:  int32(totalSkipped),
+		FilesFound:    int32(stats.found),
+		FilesImported: int32(stats.imported),
+		FilesSkipped:  int32(stats.skipped),
 	}, nil
 }
 
@@ -2075,6 +2087,10 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 	}
 
 	if strings.HasPrefix(path, "storage://") {
+		m.scanMu.Lock()
+		defer m.scanMu.Unlock()
+		m.importHints = importHintsFromRequest(req)
+		defer func() { m.importHints = nil }()
 		return m.importStoragePath(ctx, path)
 	}
 
@@ -2140,13 +2156,14 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 				FilesSkipped:  0,
 			}, nil
 		}
-		if m.importFile(path, filepath.Base(path), d.mediaType, d.libPath, d.tvLibPath) {
+		if m.importFile(path, filepath.Base(path), path, d.mediaType, d.libPath, d.tvLibPath) {
 			return &scannerv1.ImportPathResponse{
 				FilesFound:    1,
 				FilesImported: 1,
 				FilesSkipped:  0,
 			}, nil
 		}
+		m.failImport(ctx, path, "unrecognized, rejected, or blocked media file")
 		return nil, importPathSingleFileError(path)
 	}
 
@@ -2177,13 +2194,12 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 		return nil, fmt.Errorf("empty storage key")
 	}
 	m.mu.RLock()
-	mc := m.mc
 	lib, tvLib := m.libraryRoot, m.tvLibraryRoot
 	m.mu.RUnlock()
-	if mc == nil {
+	storage := m.meshStorage()
+	if storage == nil {
 		return nil, fmt.Errorf("mesh storage unavailable for %s", uri)
 	}
-	// Prefer watch-dir library roots when registered.
 	for _, d := range m.collectWatchDirs() {
 		if strings.TrimSpace(d.libPath) != "" {
 			lib = d.libPath
@@ -2195,7 +2211,7 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 
 	keys := []string{key}
 	if !looksLikeMediaStorageKey(key) {
-		objs, err := mc.Storage.List(ctx, strings.TrimSuffix(key, "/")+"/")
+		objs, err := storage.List(ctx, strings.TrimSuffix(key, "/")+"/")
 		if err != nil {
 			return nil, fmt.Errorf("storage list %s: %w", key, err)
 		}
@@ -2208,9 +2224,8 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 				keys = append(keys, o.GetKey())
 			}
 		}
-		// Also try …/files/ subprefix when given torrent/{ih}
 		if len(keys) == 0 && !strings.Contains(key, "/files/") {
-			objs, err = mc.Storage.List(ctx, strings.TrimSuffix(key, "/")+"/files/")
+			objs, err = storage.List(ctx, strings.TrimSuffix(key, "/")+"/files/")
 			if err == nil {
 				for _, o := range objs {
 					if o != nil && looksLikeMediaStorageKey(o.GetKey()) {
@@ -2221,9 +2236,6 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 		}
 	}
 
-	m.scanMu.Lock()
-	defer m.scanMu.Unlock()
-
 	var found, imported, skipped int
 	for _, k := range keys {
 		found++
@@ -2233,7 +2245,7 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 			continue
 		}
 		base := filepath.Base(k)
-		if m.importStorageObject(ctx, mc, k, base, "both", lib, tvLib) {
+		if m.importStorageObject(ctx, storage, k, base, "both", lib, tvLib) {
 			imported++
 		} else {
 			skipped++
@@ -2251,7 +2263,10 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 
 func looksLikeMediaStorageKey(key string) bool {
 	base := strings.ToLower(filepath.Base(key))
-	for _, ext := range []string{".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".ts", ".m2ts", ".mov", ".mpg", ".mpeg", ".webm"} {
+	for _, ext := range []string{
+		".mkv", ".mp4", ".avi", ".m4v", ".wmv", ".ts", ".m2ts", ".mov", ".mpg", ".mpeg", ".webm",
+		".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma",
+	} {
 		if strings.HasSuffix(base, ext) {
 			return true
 		}
@@ -2259,61 +2274,91 @@ func looksLikeMediaStorageKey(key string) bool {
 	return false
 }
 
-func (m *Module) importStorageObject(ctx context.Context, mc *client.Client, key, fileName, mediaType, libPath, tvLibPath string) bool {
-	parsed := parseFileName(fileName)
-	if parsed.MediaType == "" || parsed.MediaType == "other" {
-		switch {
-		case mediaType == "tv" || looksLikeTVName(fileName):
-			parsed.MediaType = "tv"
-		case mediaType == "movie" || parsed.Year > 0:
-			parsed.MediaType = "movie"
+func (m *Module) importStorageObject(ctx context.Context, storage meshStorage, key, fileName, mediaType, libPath, tvLibPath string) bool {
+	srcURI := "storage://" + key
+	if pathInBonusDir(filepath.ToSlash(key)) {
+		slog.Info("skipping storage object in bonus path", "key", key)
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(fileName))
+	if reason, reject := m.rejectImportCandidate(fileName, 0, ext); reject && reason != "empty file" {
+		slog.Info("skipping storage object", "key", key, "reason", reason)
+		return false
+	}
+
+	tmpDir, err := os.MkdirTemp("", "muxcore-scanner-storage-*")
+	if err != nil {
+		m.failImport(ctx, srcURI, err.Error())
+		return false
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	tmpPath := filepath.Join(tmpDir, filepath.Base(fileName))
+	rc, err := storage.Get(ctx, key)
+	if err != nil {
+		m.failImport(ctx, srcURI, err.Error())
+		return false
+	}
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		_ = rc.Close()
+		m.failImport(ctx, srcURI, err.Error())
+		return false
+	}
+	if _, copyErr := io.Copy(f, rc); copyErr != nil {
+		_ = f.Close()
+		_ = rc.Close()
+		m.failImport(ctx, srcURI, copyErr.Error())
+		return false
+	}
+	_ = f.Close()
+	_ = rc.Close()
+
+	if info, statErr := os.Stat(tmpPath); statErr == nil {
+		if reason, reject := m.rejectImportCandidate(fileName, info.Size(), strings.ToLower(filepath.Ext(fileName))); reject {
+			slog.Info("skipping storage object", "key", key, "reason", reason)
+			return false
 		}
 	}
-	if isJunkImportTitle(parsed.Title) || parsed.Title == "" || parsed.MediaType == "other" {
-		slog.Info("skipping storage object", "key", key, "title", parsed.Title)
-		return false
+
+	ok := m.importFile(tmpPath, fileName, srcURI, mediaType, libPath, tvLibPath)
+	if ok {
+		m.importStorageSidecars(ctx, storage, key, tmpPath, fileName, libPath, tvLibPath, mediaType)
 	}
-	_, destPath := m.resolveImportPaths(parsed, libPath, tvLibPath, fileName)
-	if destPath == "" {
-		return false
-	}
-	srcURI := "storage://" + key
-	if fi, err := os.Stat(destPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
-		slog.Info("skip storage import; destination already present", "key", key, "dest", destPath)
-		m.recordImported(srcURI, destPath, fileName, parsed, parsed.Quality)
-		return true
-	}
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		slog.Error("create dest for storage import", "dest", destPath, "error", err)
-		return false
-	}
-	rc, err := mc.Storage.Get(ctx, key)
+	return ok
+}
+
+func (m *Module) importStorageSidecars(ctx context.Context, storage meshStorage, mainKey, mainLocalPath, mainName, libPath, tvLibPath, mediaType string) {
+	dirPrefix := strings.TrimSuffix(filepath.ToSlash(filepath.Dir(mainKey)), "/") + "/"
+	objs, err := storage.List(ctx, dirPrefix)
 	if err != nil {
-		slog.Error("storage get for import", "key", key, "error", err)
-		return false
+		return
 	}
-	defer func() { _ = rc.Close() }()
-	tmp := destPath + ".muxcore-partial"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-	if err != nil {
-		slog.Error("create partial dest", "path", tmp, "error", err)
-		return false
+	videoBase := strings.TrimSuffix(mainName, filepath.Ext(mainName))
+	for _, o := range objs {
+		if o == nil {
+			continue
+		}
+		k := o.GetKey()
+		if k == mainKey {
+			continue
+		}
+		name := filepath.Base(k)
+		ext := strings.ToLower(filepath.Ext(name))
+		if !sidecarSubtitleExts[ext] {
+			continue
+		}
+		stem := strings.TrimSuffix(name, ext)
+		if !sidecarStemMatches(stem, videoBase) {
+			continue
+		}
+		srcURI := "storage://" + k
+		if m.isAlreadyImported(srcURI) {
+			continue
+		}
+		_ = m.importStorageObject(ctx, storage, k, name, mediaType, libPath, tvLibPath)
+		_ = mainLocalPath
 	}
-	_, copyErr := io.Copy(f, rc)
-	closeErr := f.Close()
-	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(tmp)
-		slog.Error("copy storage object", "key", key, "error", copyErr, "close", closeErr)
-		return false
-	}
-	if err := os.Rename(tmp, destPath); err != nil {
-		_ = os.Remove(tmp)
-		slog.Error("rename storage import", "dest", destPath, "error", err)
-		return false
-	}
-	m.recordImported(srcURI, destPath, fileName, parsed, parsed.Quality)
-	slog.Info("imported from storage", "key", key, "dest", destPath)
-	return true
 }
 
 func deepestWatchDir(dirs []watchDirEntry, path string) (watchDirEntry, bool) {
@@ -2407,21 +2452,36 @@ func resolveRelativeWatchPath(dirs []watchDirEntry, rel string) (string, bool) {
 }
 
 func (m *Module) ScanLibraryRoots(ctx context.Context, req *scannerv1.ScanLibraryRootsRequest) (*scannerv1.ScanLibraryRootsResponse, error) {
-	targets := m.libraryScanTargets()
-	if targets == nil {
-		return nil, fmt.Errorf("not initialized")
-	}
-	var totalFound, totalImported, totalSkipped int
-	for _, t := range targets {
-		found, imported, skipped := m.scanLibraryDirectory(t.dir, t.mediaType)
-		totalFound += found
-		totalImported += imported
-		totalSkipped += skipped
+	m.scanMu.Lock()
+	defer m.scanMu.Unlock()
+
+	stats, err := m.runLoggedScan(ctx, func(ctx context.Context) (int, int, int, error) {
+		targets := m.libraryScanTargets()
+		if targets == nil {
+			return 0, 0, 0, fmt.Errorf("not initialized")
+		}
+		var totalFound, totalImported, totalSkipped int
+		for _, t := range targets {
+			if err := importPathCheckCtx(ctx); err != nil {
+				return totalFound, totalImported, totalSkipped, err
+			}
+			found, imported, skipped, scanErr := m.scanLibraryDirectory(ctx, t.dir, t.mediaType)
+			if scanErr != nil {
+				return totalFound, totalImported, totalSkipped, scanErr
+			}
+			totalFound += found
+			totalImported += imported
+			totalSkipped += skipped
+		}
+		return totalFound, totalImported, totalSkipped, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &scannerv1.ScanLibraryRootsResponse{
-		FilesFound:    int32(totalFound),
-		FilesImported: int32(totalImported),
-		FilesSkipped:  int32(totalSkipped),
+		FilesFound:    int32(stats.found),
+		FilesImported: int32(stats.imported),
+		FilesSkipped:  int32(stats.skipped),
 	}, nil
 }
 
@@ -2434,6 +2494,7 @@ func (m *Module) libraryScanTargets() []libraryScanTarget {
 	m.mu.RLock()
 	dbReady := m.db != nil
 	tvRoot := m.tvLibraryRoot
+	musicRoot := m.musicLibraryRoot
 	m.mu.RUnlock()
 	if !dbReady {
 		return nil
@@ -2468,6 +2529,11 @@ func (m *Module) libraryScanTargets() []libraryScanTarget {
 			add(dir, "tv")
 		}
 	}
+	if musicRoot != "" {
+		for _, dir := range resolveLibraryDirs(musicRoot, "music") {
+			add(dir, "music")
+		}
+	}
 	if out == nil {
 		out = []libraryScanTarget{}
 	}
@@ -2480,8 +2546,11 @@ func resolveLibraryDirs(root, mediaType string) []string {
 		return nil
 	}
 	names := movieLibraryDirNames
-	if mediaType == "tv" {
+	switch mediaType {
+	case "tv":
 		names = tvLibraryDirNames
+	case "music":
+		names = musicLibraryDirNames
 	}
 	base := strings.ToLower(filepath.Base(root))
 	for _, name := range names {
@@ -2538,7 +2607,7 @@ func hasMediaFiles(dir string, depth int) bool {
 			}
 			continue
 		}
-		if isMediaExt(strings.ToLower(filepath.Ext(e.Name()))) {
+		if isImportableExt(strings.ToLower(filepath.Ext(e.Name()))) {
 			return true
 		}
 	}
@@ -2612,28 +2681,50 @@ func (m *Module) collectLibraryRoots() []string {
 			}
 		}
 	}
+	rows, err = m.db.Query(`SELECT DISTINCT tv_library_path FROM watch_dirs WHERE tv_library_path != ''`)
+	if err == nil {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var p string
+			if rows.Scan(&p) == nil {
+				add(p)
+			}
+		}
+	}
+	if m.musicLibraryRoot != "" {
+		add(m.musicLibraryRoot)
+	}
 	return roots
 }
 
-func (m *Module) scanLibraryDirectory(dir, mediaType string) (found, imported, skipped int) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, 0, 0
+func (m *Module) scanLibraryDirectory(ctx context.Context, dir, mediaType string) (found, imported, skipped int, err error) {
+	if err := importPathCheckCtx(ctx); err != nil {
+		return 0, 0, 0, err
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		return 0, 0, 0, nil
 	}
 	for _, entry := range entries {
+		if err := importPathCheckCtx(ctx); err != nil {
+			return found, imported, skipped, err
+		}
 		if skipLibrarySubdir(entry.Name()) {
 			continue
 		}
 		fullPath := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
-			f, i, s := m.scanLibraryDirectory(fullPath, mediaType)
+			f, i, s, subErr := m.scanLibraryDirectory(ctx, fullPath, mediaType)
+			if subErr != nil {
+				return found, imported, skipped, subErr
+			}
 			found += f
 			imported += i
 			skipped += s
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if !isMediaExt(ext) {
+		if !isImportableExt(ext) {
 			continue
 		}
 		found++
@@ -2647,12 +2738,18 @@ func (m *Module) scanLibraryDirectory(dir, mediaType string) (found, imported, s
 			skipped++
 		}
 	}
-	return
+	return found, imported, skipped, nil
 }
 
 func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool {
-	parsed := parseFileName(fileName)
-	enrichParsedFromPath(&parsed, fullPath)
+	var parsed parsedFile
+	if mediaType == "music" {
+		musicRoot := m.musicLibraryRootFor(m.libraryRoot)
+		parsed = parseMusicFile(fileName, fullPath, musicRoot)
+	} else {
+		parsed = parseFileName(fileName)
+		enrichParsedFromPath(&parsed, fullPath)
+	}
 	if parsed.Title == "" || isJunkImportTitle(parsed.Title) {
 		return false
 	}
@@ -2661,6 +2758,8 @@ func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool 
 		// ok
 	case parsed.MediaType == "other" && (mediaType == "movie" || mediaType == "tv"):
 		parsed.MediaType = mediaType
+	case mediaType == "music" && (parsed.MediaType == "music" || isAudioExt(strings.ToLower(filepath.Ext(fileName)))):
+		parsed.MediaType = "music"
 	default:
 		return false
 	}
@@ -2678,22 +2777,7 @@ func (m *Module) registerLibraryFile(fullPath, fileName, mediaType string) bool 
 	)
 	m.mu.Unlock()
 
-	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
-		"original_path":    fullPath,
-		"destination_path": fullPath,
-		"storage_key":      fullPath,
-		"media_type":       parsed.MediaType,
-		"title":            parsed.Title,
-		"year":             parsed.Year,
-		"season_number":    parsed.Season,
-		"episode_number":   parsed.Episode,
-		"episode_numbers":  episodeNumbersInt32(parsed.Episodes, parsed.Episode),
-		"absolute_number":  parsed.AbsoluteNumber,
-		"air_date":         parsed.AirDate,
-		"season_pack":      parsed.SeasonPack,
-		"quality":          quality,
-		"tmdb_id":          parsed.TMDBID,
-	})
+	go m.publishFileImported(context.Background(), fileImportedPayloadFromParsed(fullPath, fullPath, fullPath, quality, parsed))
 	return true
 }
 
@@ -2740,12 +2824,34 @@ func (m *Module) AddWatchDir(ctx context.Context, req *scannerv1.AddWatchDirRequ
 	if mediaType == "" {
 		mediaType = "both"
 	}
+	libPath := req.GetLibraryPath()
+	tvPath := m.tvLibraryRoot
+	if v := strings.TrimSpace(req.GetTvLibraryPath()); v != "" {
+		tvPath = v
+	}
+
+	var existingID string
+	err := m.db.QueryRow(`SELECT id FROM watch_dirs WHERE path = ?`, req.GetPath()).Scan(&existingID)
+	if err == nil {
+		_, err = m.db.Exec(`UPDATE watch_dirs SET media_type = ?, library_path = ?, tv_library_path = CASE WHEN ? != '' THEN ? ELSE tv_library_path END WHERE path = ?`,
+			mediaType, libPath, tvPath, tvPath, req.GetPath())
+		m.mu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("update watch dir: %w", err)
+		}
+		slog.Info("updated watch directory", "path", req.GetPath(), "id", existingID, "type", mediaType)
+		_ = m.syncWatches()
+		return &scannerv1.AddWatchDirResponse{Id: existingID}, nil
+	}
+	if err != sql.ErrNoRows {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("lookup watch dir: %w", err)
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	id := fmt.Sprintf("wd_%d", time.Now().UnixNano())
-
-	tvPath := m.tvLibraryRoot
-	_, err := m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, tv_library_path, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
-		id, req.GetPath(), mediaType, req.GetLibraryPath(), tvPath, now)
+	_, err = m.db.Exec(`INSERT INTO watch_dirs (id, path, media_type, library_path, tv_library_path, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+		id, req.GetPath(), mediaType, libPath, tvPath, now)
 	m.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("insert watch dir: %w", err)
@@ -2814,6 +2920,9 @@ func (m *Module) ListImportCandidates(ctx context.Context, req *scannerv1.ListIm
 			continue
 		}
 		_ = filepath.WalkDir(d.GetPath(), func(path string, de os.DirEntry, err error) error {
+			if err := importPathCheckCtx(ctx); err != nil {
+				return err
+			}
 			if err != nil || de == nil {
 				return nil
 			}
@@ -2823,7 +2932,11 @@ func (m *Module) ListImportCandidates(ctx context.Context, req *scannerv1.ListIm
 				}
 				return nil
 			}
-			if !isMediaExt(strings.ToLower(filepath.Ext(de.Name()))) {
+			ext := strings.ToLower(filepath.Ext(de.Name()))
+			if !isImportableExt(ext) {
+				return nil
+			}
+			if pathInBonusDir(path) {
 				return nil
 			}
 			if m.isAlreadyImported(path) {
@@ -2832,6 +2945,9 @@ func (m *Module) ListImportCandidates(ctx context.Context, req *scannerv1.ListIm
 			var size int64
 			if info, serr := de.Info(); serr == nil {
 				size = info.Size()
+			}
+			if _, reject := m.rejectImportCandidate(de.Name(), size, ext); reject {
+				return nil
 			}
 			out = append(out, &scannerv1.ImportCandidate{
 				Path: path, Name: de.Name(), Size: size, WatchDirId: d.GetId(),
@@ -2956,6 +3072,13 @@ var (
 	reGroup      = regexp.MustCompile(`(?i)-([A-Za-z0-9]+)(?:\.\w+)?$`)
 	reProper     = regexp.MustCompile(`(?i)(?:^|[.\-_ ])(proper|repack)(?:[.\-_ ]|$)`)
 )
+
+func (m *Module) rejectImportCandidate(fileName string, size int64, ext string) (reason string, reject bool) {
+	if isAudioExt(ext) {
+		return m.isSampleAudioFile(fileName, size)
+	}
+	return m.isSampleFile(fileName, size)
+}
 
 func (m *Module) isSampleFile(name string, size int64) (reason string, reject bool) {
 	if size == 0 {

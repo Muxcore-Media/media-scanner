@@ -2,14 +2,11 @@ package internal
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/Muxcore-Media/core/pkg/contracts"
 )
 
 var (
@@ -136,7 +133,10 @@ func parseMusicFromRelPath(absPath, root string) (artist, album, track string, o
 	}
 }
 
-func (m *Module) importMusicFile(fullPath, fileName, mediaType, libPath string) bool {
+func (m *Module) importMusicFile(fullPath, fileName, recordPath, mediaType, libPath string) bool {
+	if recordPath == "" {
+		recordPath = fullPath
+	}
 	ext := strings.ToLower(filepath.Ext(fileName))
 	if !isAudioExt(ext) {
 		return false
@@ -167,38 +167,29 @@ func (m *Module) importMusicFile(fullPath, fileName, mediaType, libPath string) 
 	}
 
 	if destKeepExisting(destPath, fullPath) {
-		m.recordImported(fullPath, destPath, fileName, parsed, parsed.Quality)
+		m.recordImported(recordPath, destPath, fileName, parsed, parsed.Quality)
 		return true
 	}
 
 	destDir := filepath.Dir(destPath)
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		slog.Error("create music destination directory", "path", destDir, "error", err)
+		m.failImport(context.Background(), recordPath, err.Error())
 		return false
 	}
 	if err := placeFile(fullPath, destPath, m.importMode); err != nil {
 		slog.Error("place music file", "src", fullPath, "dst", destPath, "error", err)
+		m.failImport(context.Background(), recordPath, err.Error())
 		return false
 	}
 	if m.importMode == "move" {
 		_ = os.Remove(fullPath)
 	}
 
-	m.recordImported(fullPath, destPath, fileName, parsed, parsed.Quality)
-	displayTitle := fmt.Sprintf("%s - %s", parsed.Artist, parsed.Title)
+	m.recordImported(recordPath, destPath, fileName, parsed, parsed.Quality)
 	slog.Info("imported music file", "src", fileName, "dest", destPath, "artist", parsed.Artist, "album", parsed.Album)
 
-	go m.publish(context.Background(), contracts.EventFileImported, map[string]interface{}{
-		"original_path":    fullPath,
-		"destination_path": destPath,
-		"storage_key":      storageKey,
-		"media_type":       "music",
-		"title":            displayTitle,
-		"artist":           parsed.Artist,
-		"album":            parsed.Album,
-		"track_title":      parsed.Title,
-		"quality":          parsed.Quality,
-	})
+	go m.publishFileImported(context.Background(), fileImportedPayloadFromParsed(recordPath, destPath, storageKey, parsed.Quality, parsed))
 	return true
 }
 

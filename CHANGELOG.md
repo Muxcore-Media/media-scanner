@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.27] — 2026-08-31
+
+### Added
+- `AddWatchDir` returns the existing watch-dir id on duplicate path and UPSERTs dest roots.
+- Settings persistence in SQLite (`library_root`, `tv_library_root`, `music_library_root`, `use_mesh_storage`, filters, import mode).
+- Music in `ListImportCandidates`, `ScanLibraryRoots`, and library indexing (`tv_library_path` / `music_library_root` watch dests).
+- Failed import rows (`status=failed`) and `media.import.failed` events; success uses `contracts-media/events.FileImportedPayload`.
+- Archive zip-bomb cap, encrypted-ZIP rejection, and `0644` extract permissions.
+- `Scan` / `ScanLibraryRoots` write `scan_log` and honor RPC context cancellation.
+- Forgejo CI: `golangci-lint` and `go test -race`.
+
+### Changed
+- `importStorageObject` aligns with local import (hints, samples/extras, sidecars).
+- `Makefile proto` targets `../contracts-scanner`; README / `.env.example` / AGENTS / COMPATIBILITY updated.
+
 ## [0.1.26] — 2026-08-22
 
 ### Fixed

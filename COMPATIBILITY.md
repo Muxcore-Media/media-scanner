@@ -4,11 +4,15 @@
 
 | Module Version | Core Version | Status |
 |----------------|-------------|--------|
-| v0.1.0         | v0.4.0+     | Current |
+| v0.1.27         | v0.5.8+     | Current |
 
 ## Contracts
 
-None defined — this module provides its own gRPC API.
+| Contract | Repo | Interface |
+|----------|------|-----------|
+| Scanner API | `github.com/Muxcore-Media/contracts-scanner` | `muxcore.scanner.v1.ScannerService` |
+
+Domain events are published via `github.com/Muxcore-Media/contracts-media/events` (`media.file.imported`, `media.import.failed`).
 
 ## Breaking Changes
 

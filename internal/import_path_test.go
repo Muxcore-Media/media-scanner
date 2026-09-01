@@ -51,7 +51,7 @@ func TestImportPathAlreadyImportedCountsAsSuccess(t *testing.T) {
 	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: srcDir, LibraryPath: libDir}); err != nil {
 		t.Fatal(err)
 	}
-	if !m.importFile(src, filepath.Base(src), "movie", libDir, "") {
+	if !m.importFile(src, filepath.Base(src), src, "movie", libDir, "") {
 		t.Fatal("setup import failed")
 	}
 

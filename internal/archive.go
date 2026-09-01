@@ -17,6 +17,8 @@ import (
 
 const archiveStabilityAge = 2 * time.Second
 
+var maxArchiveExtractBytes int64 = 50 << 30 // 50 GiB uncompressed cap (zip-bomb guard)
+
 var (
 	rePartRar = regexp.MustCompile(`(?i)\.part(\d+)\.rar$`)
 	reOldVol  = regexp.MustCompile(`(?i)\.r\d{2}$`)
@@ -114,7 +116,11 @@ func extractZip(archivePath, dest string) ([]string, error) {
 	}
 	defer func() { _ = r.Close() }()
 
+	var extracted int64
 	for _, f := range r.File {
+		if f.Flags&0x1 != 0 {
+			return nil, fmt.Errorf("password-protected zip not supported: %s", archivePath)
+		}
 		target, err := safeExtractPath(dest, f.Name)
 		if err != nil {
 			return nil, err
@@ -132,12 +138,12 @@ func extractZip(archivePath, dest string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			_ = rc.Close()
 			return nil, err
 		}
-		_, copyErr := io.Copy(out, rc)
+		n, copyErr := io.Copy(out, rc)
 		closeErr := out.Close()
 		_ = rc.Close()
 		if copyErr != nil {
@@ -145,6 +151,10 @@ func extractZip(archivePath, dest string) ([]string, error) {
 		}
 		if closeErr != nil {
 			return nil, closeErr
+		}
+		extracted += n
+		if extracted > maxArchiveExtractBytes {
+			return nil, fmt.Errorf("archive exceeds max extract size (%d bytes)", maxArchiveExtractBytes)
 		}
 	}
 	return []string{archivePath}, nil
@@ -157,6 +167,7 @@ func extractRar(archivePath, dest string) ([]string, error) {
 	}
 	defer func() { _ = rc.Close() }()
 
+	var extracted int64
 	for {
 		hdr, err := rc.Next()
 		if err == io.EOF {
@@ -185,13 +196,17 @@ func extractRar(archivePath, dest string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		_, copyErr := io.Copy(out, rc)
+		n, copyErr := io.Copy(out, rc)
 		closeErr := out.Close()
 		if copyErr != nil {
 			return nil, copyErr
 		}
 		if closeErr != nil {
 			return nil, closeErr
+		}
+		extracted += n
+		if extracted > maxArchiveExtractBytes {
+			return nil, fmt.Errorf("archive exceeds max extract size (%d bytes)", maxArchiveExtractBytes)
 		}
 	}
 

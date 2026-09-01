@@ -72,6 +72,94 @@ func TestAddWatchDir(t *testing.T) {
 	}
 }
 
+func TestAddWatchDirDuplicateReturnsExistingID(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+	tmp := t.TempDir()
+	first, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{
+		Path: tmp, MediaType: "movie", LibraryPath: "/movies",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{
+		Path: tmp, MediaType: "both", LibraryPath: "/lib2", TvLibraryPath: "/tv2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Id != second.Id {
+		t.Fatalf("duplicate path should return stored id, got %q then %q", first.Id, second.Id)
+	}
+	var mediaType, libPath, tvPath string
+	if err := m.db.QueryRow(`SELECT media_type, library_path, tv_library_path FROM watch_dirs WHERE id = ?`, first.Id).
+		Scan(&mediaType, &libPath, &tvPath); err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "both" || libPath != "/lib2" || tvPath != "/tv2" {
+		t.Fatalf("UPSERT dests = (%s,%s,%s)", mediaType, libPath, tvPath)
+	}
+}
+
+func TestScanRPCUpdatesScanLog(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+	watch := t.TempDir()
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: watch}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Scan(ctx, &scannerv1.ScanRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := m.GetStats(ctx, &scannerv1.GetStatsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.GetLastScanAt() == 0 {
+		t.Fatal("Scan RPC should write scan_log for GetStats")
+	}
+	if stats.GetLastScanStatus() != "completed" {
+		t.Fatalf("last scan status = %q", stats.GetLastScanStatus())
+	}
+}
+
+func TestScanLibraryRootsTVWatchPathOnly(t *testing.T) {
+	tmp := t.TempDir()
+	shows := filepath.Join(tmp, "shows")
+	epDir := filepath.Join(shows, "Test Show", "Season 01")
+	if err := os.MkdirAll(epDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	epPath := filepath.Join(epDir, "Test Show.S01E01.mkv")
+	if err := os.WriteFile(epPath, []byte("video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewModule(Config{
+		DBPath:        filepath.Join(tmp, "scanner.db"),
+		GRPCAddr:      ":0",
+		MinVideoBytes: -1,
+	})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Stop(ctx) })
+	if _, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{
+		Path: t.TempDir(), TvLibraryPath: shows,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := m.ScanLibraryRoots(ctx, &scannerv1.ScanLibraryRootsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetFilesImported() < 1 {
+		t.Fatalf("expected TV-only watch dest indexed, got %+v", resp)
+	}
+}
+
 func TestRemoveWatchDir(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()
@@ -98,7 +186,7 @@ func TestImportFile(t *testing.T) {
 	}
 
 	libPath := filepath.Join(tmp, "library")
-	result := m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", "movie", libPath, "")
+	result := m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", srcFile, "movie", libPath, "")
 	if !result {
 		t.Fatal("expected import to succeed")
 	}
@@ -125,7 +213,7 @@ func TestImportTVShow(t *testing.T) {
 	}
 
 	libPath := filepath.Join(tmp, "library")
-	result := m.importFile(srcFile, "Breaking.Bad.S05E01.1080p.BluRay.mkv", "tv", libPath, "")
+	result := m.importFile(srcFile, "Breaking.Bad.S05E01.1080p.BluRay.mkv", srcFile, "tv", libPath, "")
 	if !result {
 		t.Fatal("expected TV import to succeed")
 	}
@@ -145,7 +233,7 @@ func TestImportTVUsesTVLibraryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, "Dragon.Tales.S01E01.mkv", "both", movieLib, "") {
+	if !m.importFile(srcFile, "Dragon.Tales.S01E01.mkv", srcFile, "both", movieLib, "") {
 		t.Fatal("expected TV import to succeed")
 	}
 	want := filepath.Join(tmp, "shows", "Dragon Tales", "Season 01", "Dragon Tales.S01E01.mkv")
@@ -167,7 +255,7 @@ func TestTVImportNeverUsesMovieLibraryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, "King.Of.The.Hill.S01E01.mkv", "both", movieLib, "") {
+	if !m.importFile(srcFile, "King.Of.The.Hill.S01E01.mkv", srcFile, "both", movieLib, "") {
 		t.Fatal("expected TV import to succeed")
 	}
 	want := filepath.Join(tmp, "shows", "King Of The Hill", "Season 01", "King Of The Hill.S01E01.mkv")
@@ -228,7 +316,7 @@ func TestImportLeadingEpisodeUsesTVLibraryRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, filepath.Base(srcFile), "both", movieLib, "") {
+	if !m.importFile(srcFile, filepath.Base(srcFile), srcFile, "both", movieLib, "") {
 		t.Fatal("expected leading-episode import to succeed")
 	}
 	matches, err := filepath.Glob(filepath.Join(tmp, "shows", "The New Adventures of Winnie the Pooh", "*", "*E10*"))
@@ -256,7 +344,7 @@ func TestImportBareEpisodeNumberInheritsSeries(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, "001.mp4", "both", movieLib, "") {
+	if !m.importFile(srcFile, "001.mp4", srcFile, "both", movieLib, "") {
 		t.Fatal("expected numbered episode import")
 	}
 	want := filepath.Join(tmp, "shows", "Mister Rogers Neighborhood", "Season 01", "Mister Rogers Neighborhood.S01E01.mp4")
@@ -275,7 +363,7 @@ func TestSkipJunkRARBGTitle(t *testing.T) {
 	if err := os.WriteFile(src, []byte("junk"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if m.importFile(src, "RARBG.mkv", "both", filepath.Join(tmp, "movies"), "") {
+	if m.importFile(src, "RARBG.mkv", src, "both", filepath.Join(tmp, "movies"), "") {
 		t.Fatal("RARBG title must not import as a show")
 	}
 }
@@ -316,7 +404,7 @@ func TestImportMovieRootDoesNotDoubleNest(t *testing.T) {
 		t.Fatal(err)
 	}
 	movieLib := filepath.Join(tmp, "movies")
-	if !m.importFile(srcFile, "Totoro.1988.mkv", "movie", movieLib, "") {
+	if !m.importFile(srcFile, "Totoro.1988.mkv", srcFile, "movie", movieLib, "") {
 		t.Fatal("expected movie import")
 	}
 	want := filepath.Join(movieLib, "Totoro (1988)", "Totoro.1988.mkv")
@@ -346,7 +434,7 @@ func TestImportFileWithSidecarSubtitle(t *testing.T) {
 	}
 
 	libPath := filepath.Join(tmp, "library")
-	if !m.importFile(srcFile, "Inception.2010.1080p.mkv", "movie", libPath, "") {
+	if !m.importFile(srcFile, "Inception.2010.1080p.mkv", srcFile, "movie", libPath, "") {
 		t.Fatal("expected import to succeed")
 	}
 
@@ -368,7 +456,7 @@ func TestImportDegradesWithoutCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	libPath := filepath.Join(tmp, "library")
-	if !m.importFile(srcFile, "Dune.2021.2160p.mkv", "movie", libPath, "") {
+	if !m.importFile(srcFile, "Dune.2021.2160p.mkv", srcFile, "movie", libPath, "") {
 		t.Fatal("import should succeed without renamer/ffprobe")
 	}
 }
@@ -896,7 +984,7 @@ func TestImportHardlinkKeepsSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	libPath := filepath.Join(tmp, "library")
-	if !m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", "movie", libPath, "") {
+	if !m.importFile(srcFile, "Fight.Club.1999.1080p.BluRay.mkv", srcFile, "movie", libPath, "") {
 		t.Fatal("expected import to succeed")
 	}
 	if _, err := os.Stat(srcFile); err != nil {
@@ -1008,7 +1096,7 @@ func TestQualityUpgradeReplacesWorseEpisode(t *testing.T) {
 	if err := os.WriteFile(src, []byte("ten-eighty-upgrade-bytes"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if !m.importFile(src, filepath.Base(src), "both", filepath.Join(tmp, "movies"), "") {
+	if !m.importFile(src, filepath.Base(src), src, "both", filepath.Join(tmp, "movies"), "") {
 		t.Fatal("expected 1080p import to succeed")
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
@@ -1042,7 +1130,7 @@ func TestWorseEpisodeDoesNotReplaceBetter(t *testing.T) {
 	if err := os.WriteFile(src, []byte("worse"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if !m.importFile(src, filepath.Base(src), "both", filepath.Join(tmp, "movies"), "") {
+	if !m.importFile(src, filepath.Base(src), src, "both", filepath.Join(tmp, "movies"), "") {
 		t.Fatal("skip of worse copy should still count as handled")
 	}
 	if _, err := os.Stat(keep); err != nil {
