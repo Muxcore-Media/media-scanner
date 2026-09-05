@@ -9,33 +9,72 @@ jobs:
   release:
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v7
+      - name: Resolve sibling SHAs
+        id: refs
+        env:
+          TOKEN: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          base="https://x-access-token:${TOKEN}@github.com/Muxcore-Media"
+          resolve() {
+            local name="$1"
+            local sha
+            sha="$(git ls-remote "${base}/${name}.git" "refs/tags/${GITHUB_REF_NAME}" | awk '{print $1}')"
+            if [ -z "${sha}" ]; then
+              sha="$(git ls-remote "${base}/${name}.git" HEAD | awk '{print $1}')"
+            fi
+            echo "${name}=${sha}" >> "$GITHUB_OUTPUT"
+          }
+          for repo in core media-ffprobe media-rename media-root-folders media-subtitles media-tvshows; do
+            resolve "$repo"
+          done
+      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
         with:
-          path: core
-          repository: Muxcore-Media/core
-      - uses: actions/checkout@v7
+          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/core
+          GITHUB_REPOSITORY: Muxcore-Media/core
+          GITHUB_SHA: ${{ steps.refs.outputs.core }}
+      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
         with:
-          path: media-ffprobe
-          repository: Muxcore-Media/media-ffprobe
-      - uses: actions/checkout@v7
+          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/media-ffprobe
+          GITHUB_REPOSITORY: Muxcore-Media/media-ffprobe
+          GITHUB_SHA: ${{ steps.refs.outputs.media-ffprobe }}
+      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
         with:
-          path: media-rename
-          repository: Muxcore-Media/media-rename
-      - uses: actions/checkout@v7
+          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/media-rename
+          GITHUB_REPOSITORY: Muxcore-Media/media-rename
+          GITHUB_SHA: ${{ steps.refs.outputs.media-rename }}
+      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
         with:
-          path: media-root-folders
-          repository: Muxcore-Media/media-root-folders
-      - uses: actions/checkout@v7
+          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/media-root-folders
+          GITHUB_REPOSITORY: Muxcore-Media/media-root-folders
+          GITHUB_SHA: ${{ steps.refs.outputs.media-root-folders }}
+      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
         with:
-          path: media-subtitles
-          repository: Muxcore-Media/media-subtitles
-      - uses: actions/checkout@v7
+          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/media-subtitles
+          GITHUB_REPOSITORY: Muxcore-Media/media-subtitles
+          GITHUB_SHA: ${{ steps.refs.outputs.media-subtitles }}
+      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
         with:
-          path: media-tvshows
-          repository: Muxcore-Media/media-tvshows
-      - uses: actions/checkout@v7
+          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/media-tvshows
+          GITHUB_REPOSITORY: Muxcore-Media/media-tvshows
+          GITHUB_SHA: ${{ steps.refs.outputs.media-tvshows }}
+      - uses: Muxcore-Media/mvp/.github/actions/checkout-mirror@main
         with:
-          path: media-scanner
+          token: ${{ secrets.MUXCORE_CI_TOKEN || github.token }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}/media-scanner
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26"
