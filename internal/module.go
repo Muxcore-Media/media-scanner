@@ -206,7 +206,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.26",
+		Version:        "0.1.27",
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
@@ -234,13 +234,14 @@ func (m *Module) Init(ctx context.Context) error {
 	}
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS watch_dirs (
-			id              TEXT PRIMARY KEY,
-			path            TEXT NOT NULL UNIQUE,
-			media_type      TEXT NOT NULL DEFAULT 'both',
-			library_path    TEXT NOT NULL DEFAULT '',
-			tv_library_path TEXT NOT NULL DEFAULT '',
-			enabled         INTEGER DEFAULT 1,
-			created_at      TEXT NOT NULL
+			id                 TEXT PRIMARY KEY,
+			path               TEXT NOT NULL UNIQUE,
+			media_type         TEXT NOT NULL DEFAULT 'both',
+			library_path       TEXT NOT NULL DEFAULT '',
+			tv_library_path    TEXT NOT NULL DEFAULT '',
+			music_library_path TEXT NOT NULL DEFAULT '',
+			enabled            INTEGER DEFAULT 1,
+			created_at         TEXT NOT NULL
 		)
 	`); err != nil {
 		_ = db.Close()
@@ -250,6 +251,12 @@ func (m *Module) Init(ctx context.Context) error {
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			_ = db.Close()
 			return fmt.Errorf("add watch_dirs.tv_library_path: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE watch_dirs ADD COLUMN music_library_path TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			_ = db.Close()
+			return fmt.Errorf("add watch_dirs.music_library_path: %w", err)
 		}
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -2743,9 +2750,13 @@ func (m *Module) AddWatchDir(ctx context.Context, req *scannerv1.AddWatchDirRequ
 	now := time.Now().UTC().Format(time.RFC3339)
 	id := fmt.Sprintf("wd_%d", time.Now().UnixNano())
 
-	tvPath := m.tvLibraryRoot
-	_, err := m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, tv_library_path, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)`,
-		id, req.GetPath(), mediaType, req.GetLibraryPath(), tvPath, now)
+	tvPath := strings.TrimSpace(req.GetTvLibraryPath())
+	if tvPath == "" {
+		tvPath = m.tvLibraryRoot
+	}
+	musicPath := strings.TrimSpace(req.GetMusicLibraryPath())
+	_, err := m.db.Exec(`INSERT OR IGNORE INTO watch_dirs (id, path, media_type, library_path, tv_library_path, music_library_path, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+		id, req.GetPath(), mediaType, req.GetLibraryPath(), tvPath, musicPath, now)
 	m.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("insert watch dir: %w", err)
@@ -2754,6 +2765,79 @@ func (m *Module) AddWatchDir(ctx context.Context, req *scannerv1.AddWatchDirRequ
 	slog.Info("added watch directory", "path", req.GetPath(), "type", mediaType)
 	_ = m.syncWatches()
 	return &scannerv1.AddWatchDirResponse{Id: id}, nil
+}
+
+func (m *Module) UpdateWatchDir(ctx context.Context, req *scannerv1.UpdateWatchDirRequest) (*scannerv1.UpdateWatchDirResponse, error) {
+	id := strings.TrimSpace(req.GetId())
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	m.mu.Lock()
+	if m.db == nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("not initialized")
+	}
+
+	var path, mediaType, libPath, tvPath, musicPath, createdAt string
+	var enabled int
+	err := m.db.QueryRow(`SELECT path, media_type, library_path, IFNULL(tv_library_path,''), IFNULL(music_library_path,''), enabled, created_at FROM watch_dirs WHERE id = ?`, id).
+		Scan(&path, &mediaType, &libPath, &tvPath, &musicPath, &enabled, &createdAt)
+	if err != nil {
+		m.mu.Unlock()
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("watch dir not found")
+		}
+		return nil, fmt.Errorf("load watch dir: %w", err)
+	}
+	if v := strings.TrimSpace(req.GetPath()); v != "" {
+		path = v
+	}
+	if v := strings.TrimSpace(req.GetMediaType()); v != "" {
+		mediaType = v
+	}
+	if v := strings.TrimSpace(req.GetLibraryPath()); v != "" {
+		libPath = v
+	}
+	if v := strings.TrimSpace(req.GetTvLibraryPath()); v != "" {
+		tvPath = v
+	}
+	if v := strings.TrimSpace(req.GetMusicLibraryPath()); v != "" {
+		musicPath = v
+	}
+	_, err = m.db.Exec(`UPDATE watch_dirs SET path = ?, media_type = ?, library_path = ?, tv_library_path = ?, music_library_path = ? WHERE id = ?`,
+		path, mediaType, libPath, tvPath, musicPath, id)
+	m.mu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("update watch dir: %w", err)
+	}
+	_ = m.syncWatches()
+	return &scannerv1.UpdateWatchDirResponse{}, nil
+}
+
+func (m *Module) SetWatchDirEnabled(ctx context.Context, req *scannerv1.SetWatchDirEnabledRequest) (*scannerv1.SetWatchDirEnabledResponse, error) {
+	id := strings.TrimSpace(req.GetId())
+	if id == "" {
+		return nil, fmt.Errorf("id is required")
+	}
+	enabled := 0
+	if req.GetEnabled() {
+		enabled = 1
+	}
+	m.mu.Lock()
+	if m.db == nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("not initialized")
+	}
+	res, err := m.db.Exec(`UPDATE watch_dirs SET enabled = ? WHERE id = ?`, enabled, id)
+	m.mu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("set watch dir enabled: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("watch dir not found")
+	}
+	_ = m.syncWatches()
+	return &scannerv1.SetWatchDirEnabledResponse{}, nil
 }
 
 func (m *Module) RemoveWatchDir(ctx context.Context, req *scannerv1.RemoveWatchDirRequest) (*scannerv1.RemoveWatchDirResponse, error) {
@@ -2778,7 +2862,7 @@ func (m *Module) ListWatchDirs(ctx context.Context, req *scannerv1.ListWatchDirs
 		return nil, fmt.Errorf("not initialized")
 	}
 
-	rows, err := m.db.Query(`SELECT id, path, media_type, library_path, enabled, created_at FROM watch_dirs`)
+	rows, err := m.db.Query(`SELECT id, path, media_type, library_path, IFNULL(tv_library_path,''), IFNULL(music_library_path,''), enabled, created_at FROM watch_dirs`)
 	if err != nil {
 		return nil, fmt.Errorf("query watch dirs: %w", err)
 	}
@@ -2786,14 +2870,15 @@ func (m *Module) ListWatchDirs(ctx context.Context, req *scannerv1.ListWatchDirs
 
 	var dirs []*scannerv1.WatchDir
 	for rows.Next() {
-		var id, path, mediaType, libPath, createdAt string
+		var id, path, mediaType, libPath, tvPath, musicPath, createdAt string
 		var enabled int
-		if err := rows.Scan(&id, &path, &mediaType, &libPath, &enabled, &createdAt); err != nil {
+		if err := rows.Scan(&id, &path, &mediaType, &libPath, &tvPath, &musicPath, &enabled, &createdAt); err != nil {
 			continue
 		}
 		dirs = append(dirs, &scannerv1.WatchDir{
 			Id: id, Path: path, MediaType: mediaType,
-			LibraryPath: libPath, Enabled: enabled != 0, CreatedAt: createdAt,
+			LibraryPath: libPath, TvLibraryPath: tvPath, MusicLibraryPath: musicPath,
+			Enabled: enabled != 0, CreatedAt: createdAt,
 		})
 	}
 	return &scannerv1.ListWatchDirsResponse{Dirs: dirs}, nil

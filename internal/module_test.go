@@ -72,6 +72,77 @@ func TestAddWatchDir(t *testing.T) {
 	}
 }
 
+func TestUpdateWatchDir(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	tmp := t.TempDir()
+	add, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{
+		Path:          tmp,
+		MediaType:     "movie",
+		LibraryPath:   "/data/movies",
+		TvLibraryPath: "/data/tv",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := t.TempDir()
+	if _, err := m.UpdateWatchDir(ctx, &scannerv1.UpdateWatchDirRequest{
+		Id:               add.Id,
+		Path:             next,
+		MediaType:        "both",
+		LibraryPath:      "/data/uhd",
+		TvLibraryPath:    "/data/shows",
+		MusicLibraryPath: "/data/music",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := m.ListWatchDirs(ctx, &scannerv1.ListWatchDirsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Dirs) != 1 {
+		t.Fatalf("expected 1 dir, got %d", len(list.Dirs))
+	}
+	dir := list.Dirs[0]
+	if dir.Path != next || dir.MediaType != "both" || dir.LibraryPath != "/data/uhd" {
+		t.Fatalf("updated %#v", dir)
+	}
+	if dir.TvLibraryPath != "/data/shows" || dir.MusicLibraryPath != "/data/music" {
+		t.Fatalf("library paths %#v", dir)
+	}
+}
+
+func TestSetWatchDirEnabled(t *testing.T) {
+	m := newTestModule(t)
+	ctx := context.Background()
+
+	add, err := m.AddWatchDir(ctx, &scannerv1.AddWatchDirRequest{Path: t.TempDir(), MediaType: "tv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SetWatchDirEnabled(ctx, &scannerv1.SetWatchDirEnabledRequest{Id: add.Id, Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := m.ListWatchDirs(ctx, &scannerv1.ListWatchDirsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Dirs) != 1 || list.Dirs[0].Enabled {
+		t.Fatalf("expected paused dir, got %#v", list.Dirs)
+	}
+	if _, err := m.SetWatchDirEnabled(ctx, &scannerv1.SetWatchDirEnabledRequest{Id: add.Id, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	list, err = m.ListWatchDirs(ctx, &scannerv1.ListWatchDirsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !list.Dirs[0].Enabled {
+		t.Fatal("expected enabled after resume")
+	}
+}
+
 func TestRemoveWatchDir(t *testing.T) {
 	m := newTestModule(t)
 	ctx := context.Background()

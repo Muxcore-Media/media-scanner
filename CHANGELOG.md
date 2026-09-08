@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.27] — 2026-09-08
+
+### Added
+- `UpdateWatchDir` and `SetWatchDirEnabled` so household Settings can pause or retarget a watch folder without delete-and-re-add.
+- Persist `tv_library_path` / `music_library_path` from `AddWatchDir` and return them on `ListWatchDirs`.
+
 ## [0.1.26] — 2026-08-22
 
 ### Fixed
