@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.29] - 2026-10-05
+
+
+### Fixed
+- Rename previews are now requested with a relative `FilePath` (the file name), so media-rename returns a library-relative `NewPath` and the household naming template applies to imports.
+- Imports no longer nest media-rename's absolute `Preview.NewPath` under the library root (e.g. `library/Movies/home/.../Fight Club (1999)/...`). Absolute preview paths are used only when inside the intended library root, relative ones are joined under it, and anything escaping (`..` or outside the root) falls back to the scanner's own naming.
+
 ## [0.1.28] - 2026-10-05
 
 

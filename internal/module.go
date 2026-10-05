@@ -38,6 +38,9 @@ type Module struct {
 	db *sql.DB
 	mc *client.Client
 
+	// previewRenameFn overrides the media.renamer Preview RPC (tests).
+	previewRenameFn func(req *renamev1.PreviewRequest) (*renamev1.PreviewResponse, error)
+
 	id               string
 	dbPath           string
 	grpcAddr         string
@@ -1047,6 +1050,33 @@ func libraryKindPrefix(root, mediaType string) string {
 	}
 }
 
+// previewRelPath converts media-rename's Preview.NewPath into a path relative
+// to base (the intended library root). Contract: media-rename's
+// resolveLibraryDest returns a RELATIVE template path when the request
+// FilePath is relative, but an ABSOLUTE path (under the source folder or
+// library root) when FilePath is absolute, as it is here. Relative is the
+// canonical form for the scanner (it owns the library root); an absolute path
+// is accepted only when it lies inside base. Anything that would escape base
+// (".." or an absolute path elsewhere) is rejected so the caller falls back to
+// the scanner's own naming.
+func previewRelPath(base, newPath string) (string, bool) {
+	p := filepath.Clean(filepath.FromSlash(strings.TrimSpace(newPath)))
+	if p == "." || p == "" {
+		return "", false
+	}
+	if filepath.IsAbs(p) {
+		rel, err := filepath.Rel(filepath.Clean(base), p)
+		if err != nil {
+			return "", false
+		}
+		p = rel
+	}
+	if p == "." || p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) || filepath.IsAbs(p) {
+		return "", false
+	}
+	return p, true
+}
+
 func (m *Module) resolveImportPaths(parsed parsedFile, libPath, tvLibPath, fullPath string) (storageKey, destPath string) {
 	storageKey = m.buildStorageKey(parsed)
 	destPath = m.buildDestPath(parsed, libPath, tvLibPath)
@@ -1057,13 +1087,16 @@ func (m *Module) resolveImportPaths(parsed parsedFile, libPath, tvLibPath, fullP
 	if preview := m.previewRename(fullPath, parsed, tplID); preview != nil && preview.GetNewPath() != "" {
 		root := m.destRootFor(parsed, libPath, tvLibPath)
 		folder := libraryKindPrefix(root, parsed.MediaType)
-		rel := filepath.Clean(preview.GetNewPath())
-		if folder == "" {
-			storageKey = filepath.ToSlash(filepath.Join("media", rel))
-			destPath = filepath.Join(root, rel)
-		} else {
+		base := root
+		if folder != "" {
+			base = filepath.Join(root, folder)
+		}
+		if rel, ok := previewRelPath(base, preview.GetNewPath()); ok {
 			storageKey = filepath.ToSlash(filepath.Join("media", folder, rel))
-			destPath = filepath.Join(root, folder, rel)
+			destPath = filepath.Join(base, rel)
+		} else {
+			slog.Warn("rename preview path outside library root; using scanner naming",
+				"new_path", preview.GetNewPath(), "library_root", base)
 		}
 	}
 	return storageKey, destPath
@@ -1110,20 +1143,14 @@ func dialAddrForModule(moduleID, httpAddr string) string {
 
 func (m *Module) previewRename(fullPath string, parsed parsedFile, templateID string) *renamev1.PreviewResponse {
 	ctx := context.Background()
-	addr, err := m.findCapabilityAddr(ctx, "media.renamer")
-	if err != nil {
-		return nil
-	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = conn.Close() }()
-	cli := renamev1.NewRenameServiceClient(conn)
 
 	edition, group := parseEditionAndGroup(parsed.FileName)
 	req := &renamev1.PreviewRequest{
-		FilePath:       fullPath,
+		// Relative on purpose: media-rename's resolveLibraryDest then returns a
+		// library-relative NewPath (template applied) instead of an absolute path
+		// under the source folder. Preview only uses FilePath for that join;
+		// metadata comes from the fields below.
+		FilePath:       filepath.Base(fullPath),
 		MediaType:      parsed.MediaType,
 		Title:          parsed.Title,
 		Year:           int32(parsed.Year),
@@ -1176,7 +1203,22 @@ func (m *Module) previewRename(fullPath string, parsed parsedFile, templateID st
 		}
 	}
 
-	resp, err := cli.Preview(ctx, req)
+	var resp *renamev1.PreviewResponse
+	var err error
+	if m.previewRenameFn != nil {
+		resp, err = m.previewRenameFn(req)
+	} else {
+		addr, aerr := m.findCapabilityAddr(ctx, "media.renamer")
+		if aerr != nil {
+			return nil
+		}
+		conn, cerr := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if cerr != nil {
+			return nil
+		}
+		defer func() { _ = conn.Close() }()
+		resp, err = renamev1.NewRenameServiceClient(conn).Preview(ctx, req)
+	}
 	if err != nil {
 		slog.Debug("rename preview failed", "error", err)
 		return nil
