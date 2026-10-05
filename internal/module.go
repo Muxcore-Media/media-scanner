@@ -22,6 +22,7 @@ import (
 	scannerv1 "github.com/Muxcore-Media/contracts-scanner/muxcore/scanner/v1"
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
 	renamev1 "github.com/Muxcore-Media/media-rename/proto/renamev1"
+	manifest "github.com/Muxcore-Media/media-scanner"
 	tvmgmtv1 "github.com/Muxcore-Media/media-tvshows/proto/tvmgmtv1"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
@@ -209,7 +210,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media Scanner",
-		Version:        "0.1.27",
+		Version:        modulesdk.ManifestVersion(manifest.ManifestJSON),
 		Roles:          []string{"scanner"},
 		Description:    "Scans download directories, identifies media files, and imports them into the library",
 		Author:         "MuxCore",
