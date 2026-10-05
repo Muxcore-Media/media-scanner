@@ -1,0 +1,44 @@
+//go:build upgradeseed
+
+package internal
+
+import (
+	"context"
+	"os"
+	"testing"
+)
+
+// TestUpgradeSeed opens a DB at $UPGRADE_SEED_DB via the release's Init and
+// seeds representative rows into every table.
+func TestUpgradeSeed(t *testing.T) {
+	path := os.Getenv("UPGRADE_SEED_DB")
+	if path == "" {
+		t.Skip("UPGRADE_SEED_DB not set")
+	}
+	m := NewModule(Config{DBPath: path, GRPCAddr: "127.0.0.1:0", LibraryRoot: "/data/media/movies"})
+	ctx := context.Background()
+	if err := m.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{
+		`INSERT INTO watch_dirs (id, path, media_type, library_path, enabled, created_at) VALUES
+			('wd_1', '/home/alice/Downloads', 'both', '/data/media/movies', 1, '2025-01-02T03:04:05Z'),
+			('wd_2', '/mnt/torrents/tv', 'tv', '/data/media/tv', 0, '2025-02-03T04:05:06Z'),
+			('wd_3', '/srv/bob/music-drop', 'music', '', 1, '2025-03-04T05:06:07Z')`,
+		`INSERT INTO imported_files (id, original_path, destination_path, file_name, media_type, title, year, season_number, episode_number, quality, tmdb_id, imported_at, status) VALUES
+			('if_1', '/home/alice/Downloads/The.Matrix.1999.1080p.mkv', '/data/media/movies/The Matrix (1999)/The Matrix (1999).mkv', 'The Matrix (1999).mkv', 'movie', 'The Matrix', 1999, 0, 0, '1080p', 603, '2025-01-02T10:00:00Z', 'imported'),
+			('if_2', '/mnt/torrents/tv/Show.S02E05.720p.mkv', '/data/media/tv/Show/Season 02/Show - S02E05.mkv', 'Show - S02E05.mkv', 'tv', 'Show', 2020, 2, 5, '720p', 1399, '2025-02-04T11:00:00Z', 'imported'),
+			('if_3', '/home/alice/Downloads/Family.Holiday.mkv', '/data/media/movies/Family Holiday/Family Holiday.mkv', 'Family Holiday.mkv', 'movie', 'Family Holiday', 0, 0, 0, '', 0, '2025-03-05T12:00:00Z', 'failed')`,
+		`INSERT INTO scan_log (id, started_at, completed_at, files_found, files_imported, files_skipped, status) VALUES
+			('sl_1', '2025-01-02T09:59:00Z', '2025-01-02T10:01:00Z', 10, 7, 3, 'completed'),
+			('sl_2', '2025-03-05T11:59:00Z', NULL, 4, 1, 0, 'running')`,
+	}
+	for _, s := range stmts {
+		if _, err := m.db.Exec(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

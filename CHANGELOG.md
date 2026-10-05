@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.28] - 2026-10-05
+
+
+### Added
+- Upgrade test (`internal/upgrade_test.go`, ADR-0015 / NFR-DATA-002) opening the committed v0.1.9 database snapshot (`internal/testdata/upgrade/`) with the current code twice and checking schema superset, seeded-row read-back, new-column defaults, and integrity.
+
 ## [0.1.27] — 2026-09-08
 
 ### Added
