@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -37,7 +38,9 @@ type Module struct {
 
 	mu sync.RWMutex
 	db *sql.DB
-	mc *client.Client
+	// mc is the core mesh client, set asynchronously by dialCore. Always read
+	// it via coreClient(); nil means not (yet) connected.
+	mc atomic.Pointer[client.Client]
 
 	// previewRenameFn overrides the media.renamer Preview RPC (tests).
 	previewRenameFn func(req *renamev1.PreviewRequest) (*renamev1.PreviewResponse, error)
@@ -367,10 +370,10 @@ func (m *Module) Stop(ctx context.Context) error {
 	if m.grpcSrv != nil {
 		m.grpcSrv.GracefulStop()
 	}
-	m.mu.Lock()
-	if m.mc != nil {
-		_ = m.mc.Close()
+	if c := m.mc.Swap(nil); c != nil {
+		_ = c.Close()
 	}
+	m.mu.Lock()
 	if m.db != nil {
 		_ = m.db.Close()
 		m.db = nil
@@ -405,18 +408,20 @@ func (m *Module) dialCore(ctx context.Context) {
 		slog.Error("media-scanner: dial core", "error", err)
 		return
 	}
-	m.mu.Lock()
-	m.mc = c
-	m.mu.Unlock()
+	m.mc.Store(c)
 	slog.Info("media-scanner: connected to core mesh", "addr", meshAddr)
 }
 
+// coreClient returns the core mesh client, or nil if not yet connected.
+func (m *Module) coreClient() *client.Client { return m.mc.Load() }
+
 func (m *Module) publish(ctx context.Context, eventType string, payload map[string]interface{}) {
-	if m.mc == nil {
+	mc := m.coreClient()
+	if mc == nil {
 		return
 	}
 	data, _ := json.Marshal(payload)
-	if err := m.mc.Events.Publish(ctx, eventType, m.id, data); err != nil {
+	if err := mc.Events.Publish(ctx, eventType, m.id, data); err != nil {
 		slog.Warn("publish event failed", "type", eventType, "error", err)
 	}
 }
@@ -684,14 +689,15 @@ func (m *Module) importFile(fullPath, fileName, mediaType, libPath, tvLibPath st
 	// (vault remuxes) and then falls back anyway — skip the round-trip.
 	// Mesh Storage.Put EOFs on large files on this host. Local copy/link unless
 	// SCANNER_USE_MESH_STORAGE is explicitly enabled.
-	tryStorage := m.useMeshStorage && m.mc != nil && destPath == "" && !destExists && !m.storagePutCooling(storageKey)
+	mc := m.coreClient()
+	tryStorage := m.useMeshStorage && mc != nil && destPath == "" && !destExists && !m.storagePutCooling(storageKey)
 	if tryStorage {
 		f, err := os.Open(fullPath)
 		if err != nil {
 			slog.Error("open source file for storage put", "src", fullPath, "error", err)
 			return false
 		}
-		if err := m.mc.Storage.Put(context.Background(), storageKey, f); err != nil {
+		if err := mc.Storage.Put(context.Background(), storageKey, f); err != nil {
 			_ = f.Close()
 			m.markStoragePutFailed(storageKey)
 			slog.Warn("storage put failed; falling back to local import",
@@ -1110,10 +1116,11 @@ func (m *Module) resolveImportPaths(parsed parsedFile, libPath, tvLibPath, fullP
 }
 
 func (m *Module) findCapabilityAddr(ctx context.Context, capability string) (string, error) {
-	if m.mc == nil {
+	mc := m.coreClient()
+	if mc == nil {
 		return "", fmt.Errorf("not connected to core")
 	}
-	modules, err := m.mc.Discovery.FindByCapability(ctx, capability)
+	modules, err := mc.Discovery.FindByCapability(ctx, capability)
 	if err != nil {
 		return "", err
 	}
@@ -1434,10 +1441,10 @@ func (m *Module) importSidecarSubtitles(srcVideo, destVideo, storageKey string) 
 			slog.Debug("copy subtitle failed", "src", srcSub, "error", err)
 			continue
 		}
-		if m.useMeshStorage && m.mc != nil {
+		if mc := m.coreClient(); m.useMeshStorage && mc != nil {
 			f, err := os.Open(destSub)
 			if err == nil {
-				if err := m.mc.Storage.Put(context.Background(), subKey, f); err != nil {
+				if err := mc.Storage.Put(context.Background(), subKey, f); err != nil {
 					slog.Debug("storage put subtitle failed", "key", subKey, "error", err)
 				}
 				_ = f.Close()
@@ -2233,7 +2240,7 @@ func (m *Module) importStoragePath(ctx context.Context, uri string) (*scannerv1.
 		return nil, fmt.Errorf("empty storage key")
 	}
 	m.mu.RLock()
-	mc := m.mc
+	mc := m.coreClient()
 	lib, tvLib := m.libraryRoot, m.tvLibraryRoot
 	m.mu.RUnlock()
 	if mc == nil {

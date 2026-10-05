@@ -10,7 +10,8 @@ import (
 )
 
 func (m *Module) listRegisteredRoots(ctx context.Context) ([]*rootsv1.RootFolder, bool) {
-	if m.mc == nil {
+	mc := m.coreClient()
+	if mc == nil {
 		return nil, false
 	}
 	addr, err := m.findCapabilityAddr(ctx, "media.roots")
