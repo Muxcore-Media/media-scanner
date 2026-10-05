@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -85,11 +86,17 @@ func (m *Module) updateSetting(key, value string) error {
 		if value == "" {
 			return fmt.Errorf("library_root must not be empty")
 		}
+		if err := m.confineConfiguredPath(context.Background(), "library_root", value); err != nil {
+			return err
+		}
 		m.mu.Lock()
 		m.libraryRoot = value
 		m.mu.Unlock()
 		return nil
 	case "tv_library_root", "SCANNER_TV_LIBRARY_ROOT":
+		if err := m.confineConfiguredPath(context.Background(), "tv_library_root", value); err != nil {
+			return err
+		}
 		m.mu.Lock()
 		m.tvLibraryRoot = value
 		m.mu.Unlock()

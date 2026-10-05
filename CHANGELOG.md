@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.34] - 2026-10-05
+
+
+### Security
+- Path confinement (sdk/go/module v0.6.6 `pathguard`, NFR-SEC-008 / RULE-VAL-1): `AddWatchDir` / `UpdateWatchDir` (`path`, `library_path`, `tv_library_path`, `music_library_path`) and the `library_root` / `tv_library_root` settings only accept absolute paths that resolve (symlinks included, `..` refused, sibling-prefix safe) inside the configured roots: `SCANNER_LIBRARY_ROOT`, `SCANNER_TV_LIBRARY_ROOT`, `SCANNER_MUSIC_LIBRARY_ROOT`, `SCANNER_DEFAULT_WATCH_DIR`, the new `SCANNER_ALLOWED_ROOTS` (path-list), plus accessible roots registered in media-root-folders. If media-root-folders is unreachable only the configured roots apply (narrower, never wider); the allow-list comes from the environment so a settings change cannot widen it.
+- `ImportPath` matches the watch directory by resolved real path instead of a lexical prefix: a symlink inside a watch directory that points elsewhere, `/downloads2` vs `/downloads`, and `..` escapes are refused before any file is moved/copied.
+- Stored watch directories outside the configured roots are logged at start-up.
+
 ## [0.1.33] - 2026-10-05
 
 

@@ -70,6 +70,10 @@ type Module struct {
 
 	useMeshStorage bool
 
+	// baseRoots are the configured roots caller-supplied paths are confined
+	// to (see baseRootsFromConfig); immutable after NewModule.
+	baseRoots []string
+
 	putFailMu    sync.Mutex
 	putFailUntil map[string]time.Time
 
@@ -101,6 +105,9 @@ type Config struct {
 	SafetyRescan     time.Duration
 	InitialScanDelay time.Duration
 	UseMeshStorage   bool
+	// AllowedRoots extends the directories watch/library paths may resolve
+	// inside (also SCANNER_ALLOWED_ROOTS, path-list separated).
+	AllowedRoots []string
 }
 
 func NewModule(cfg Config) *Module {
@@ -206,6 +213,7 @@ func NewModule(cfg Config) *Module {
 		safetyRescan:     safetyRescan,
 		initialDelay:     initialDelay,
 		useMeshStorage:   cfg.UseMeshStorage,
+		baseRoots:        baseRootsFromConfig(cfg),
 	}
 }
 
@@ -324,6 +332,7 @@ func (m *Module) Init(ctx context.Context) error {
 		)
 		slog.Info("auto-registered watch dir", "path", m.defaultWatchDir, "movies", libPath, "tv", tvPath)
 	}
+	m.warnWatchDirsOutsideRoots()
 
 	lis, err := net.Listen("tcp", m.grpcAddr)
 	if err != nil {
@@ -2160,7 +2169,7 @@ func (m *Module) ImportPath(ctx context.Context, req *scannerv1.ImportPathReques
 		}
 	}
 
-	d, ok := deepestWatchDir(dirs, path)
+	d, ok := confinedWatchDir(dirs, path)
 	if !ok {
 		return nil, importPathWatchDirError(path, unresolvedRel, dirs)
 	}
@@ -2377,22 +2386,6 @@ func (m *Module) importStorageObject(ctx context.Context, mc *client.Client, key
 	m.recordImported(srcURI, destPath, fileName, parsed, parsed.Quality)
 	slog.Info("imported from storage", "key", key, "dest", destPath)
 	return true
-}
-
-func deepestWatchDir(dirs []watchDirEntry, path string) (watchDirEntry, bool) {
-	clean := filepath.Clean(path)
-	var best watchDirEntry
-	bestLen := -1
-	for _, d := range dirs {
-		root := filepath.Clean(d.path)
-		if clean == root || strings.HasPrefix(clean, root+string(os.PathSeparator)) {
-			if len(root) > bestLen {
-				best = d
-				bestLen = len(root)
-			}
-		}
-	}
-	return best, bestLen >= 0
 }
 
 // withPartialsImportRoots lets ImportPath accept completed torrents that landed
@@ -2793,6 +2786,17 @@ func (m *Module) AddWatchDir(ctx context.Context, req *scannerv1.AddWatchDirRequ
 	if req.GetPath() == "" {
 		return nil, fmt.Errorf("path is required")
 	}
+	if !filepath.IsAbs(strings.TrimSpace(req.GetPath())) {
+		return nil, fmt.Errorf("path %q must be absolute", req.GetPath())
+	}
+	for field, p := range map[string]string{
+		"path": req.GetPath(), "library_path": req.GetLibraryPath(),
+		"tv_library_path": req.GetTvLibraryPath(), "music_library_path": req.GetMusicLibraryPath(),
+	} {
+		if err := m.confineConfiguredPath(ctx, field, p); err != nil {
+			return nil, err
+		}
+	}
 	m.mu.Lock()
 	if m.db == nil {
 		m.mu.Unlock()
@@ -2827,6 +2831,14 @@ func (m *Module) UpdateWatchDir(ctx context.Context, req *scannerv1.UpdateWatchD
 	id := strings.TrimSpace(req.GetId())
 	if id == "" {
 		return nil, fmt.Errorf("id is required")
+	}
+	for field, p := range map[string]string{
+		"path": req.GetPath(), "library_path": req.GetLibraryPath(),
+		"tv_library_path": req.GetTvLibraryPath(), "music_library_path": req.GetMusicLibraryPath(),
+	} {
+		if err := m.confineConfiguredPath(ctx, field, p); err != nil {
+			return nil, err
+		}
 	}
 	m.mu.Lock()
 	if m.db == nil {
