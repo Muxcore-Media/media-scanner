@@ -140,6 +140,12 @@
 
 ## Unreleased
 
+## [0.1.27] - 2026-10-05
+
+### Changed
+- CI runs on GitHub-hosted runners from the umbrella template; retired-origin workflows removed.
+- Dependencies resolve from published GitHub tags (no filesystem `replace`); requires core v0.6.0.
+
 - Replace 60s poll with fsnotify watching and a configurable safety rescan (`SCANNER_SAFETY_RESCAN`, default 15m)
 - Extract ZIP/RAR archives into the watch tree before import (zip-slip safe; password archives skipped)
 - `ImportPath` RPC — targeted scan/import of a path under a registered watch dir (used by media-automation on download complete)
