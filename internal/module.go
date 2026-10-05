@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	scannerv1 "github.com/Muxcore-Media/contracts-scanner/muxcore/scanner/v1"
+	"github.com/Muxcore-Media/core/sdk/go/module/meshtls"
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
 	renamev1 "github.com/Muxcore-Media/media-rename/proto/renamev1"
 	manifest "github.com/Muxcore-Media/media-scanner"
@@ -337,7 +337,11 @@ func (m *Module) Init(ctx context.Context) error {
 }
 
 func (m *Module) Start(ctx context.Context) error {
-	m.grpcSrv = grpc.NewServer()
+	srv, err := meshtls.NewServer()
+	if err != nil {
+		return fmt.Errorf("gRPC mesh TLS: %w", err)
+	}
+	m.grpcSrv = srv
 	scannerv1.RegisterScannerServiceServer(m.grpcSrv, m)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
@@ -363,10 +367,10 @@ func (m *Module) Stop(ctx context.Context) error {
 	if m.grpcSrv != nil {
 		m.grpcSrv.GracefulStop()
 	}
+	m.mu.Lock()
 	if m.mc != nil {
 		_ = m.mc.Close()
 	}
-	m.mu.Lock()
 	if m.db != nil {
 		_ = m.db.Close()
 		m.db = nil
@@ -401,7 +405,9 @@ func (m *Module) dialCore(ctx context.Context) {
 		slog.Error("media-scanner: dial core", "error", err)
 		return
 	}
+	m.mu.Lock()
 	m.mc = c
+	m.mu.Unlock()
 	slog.Info("media-scanner: connected to core mesh", "addr", meshAddr)
 }
 
@@ -1213,7 +1219,7 @@ func (m *Module) previewRename(fullPath string, parsed parsedFile, templateID st
 		if aerr != nil {
 			return nil
 		}
-		conn, cerr := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, cerr := meshtls.Dial(addr)
 		if cerr != nil {
 			return nil
 		}
@@ -1244,7 +1250,7 @@ func (m *Module) probeRenameMeta(path string) *renameProbeMeta {
 	if err != nil {
 		return nil
 	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := meshtls.Dial(addr)
 	if err != nil {
 		return nil
 	}
@@ -1285,7 +1291,7 @@ func (m *Module) lookupEpisodeRenameMeta(ctx context.Context, parsed parsedFile)
 	if err != nil {
 		return nil
 	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := meshtls.Dial(addr)
 	if err != nil {
 		return nil
 	}
@@ -1321,7 +1327,7 @@ func (m *Module) probeQuality(ctx context.Context, path string) string {
 	if err != nil {
 		return ""
 	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := meshtls.Dial(addr)
 	if err != nil {
 		return ""
 	}

@@ -7,7 +7,7 @@ require (
 	github.com/Muxcore-Media/core v0.6.14
 	github.com/Muxcore-Media/core/pkg/contracts v0.6.0
 	github.com/Muxcore-Media/core/sdk/go/client v0.6.1
-	github.com/Muxcore-Media/core/sdk/go/module v0.6.4
+	github.com/Muxcore-Media/core/sdk/go/module v0.6.5
 	github.com/Muxcore-Media/media-ffprobe v0.1.9
 	github.com/Muxcore-Media/media-rename v0.2.7
 	github.com/Muxcore-Media/media-tvshows v0.1.13

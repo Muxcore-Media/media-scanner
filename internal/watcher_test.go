@@ -11,6 +11,7 @@ import (
 )
 
 func TestFsnotifyTriggersImport(t *testing.T) {
+	t.Setenv("MUXCORE_DEV_TLS_SKIP", "true") // plaintext gRPC listener for this test (meshtls dev flag)
 	tmp := t.TempDir()
 	srcDir := filepath.Join(tmp, "downloads")
 	libDir := filepath.Join(tmp, "library")
