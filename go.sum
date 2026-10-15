@@ -1,7 +1,7 @@
 github.com/Muxcore-Media/contracts-scanner v0.2.0 h1:JNAblB6JIzSyVwd6rlGXcvGWEOJ2nmasjswQMB7gC5A=
 github.com/Muxcore-Media/contracts-scanner v0.2.0/go.mod h1:CrRY4UsFknJvlyOr3G6Vb0kK7NrbpFpLE/mWO5WQk7k=
-github.com/Muxcore-Media/core v0.6.14 h1:txrjE0arrInXP1LVPC3dPRReehexEqmPRMVtM66rSPQ=
-github.com/Muxcore-Media/core v0.6.14/go.mod h1:lZ6tuCEjwmXI0zd6lhKOkm/qpB1Js4rrB+Bs9lCNZjA=
+github.com/Muxcore-Media/core v0.6.17 h1:Im5PGyr0VAwOSvVdlf+AzAx+Ct1pX7at42nd7ZiMOsg=
+github.com/Muxcore-Media/core v0.6.17/go.mod h1:lZ6tuCEjwmXI0zd6lhKOkm/qpB1Js4rrB+Bs9lCNZjA=
 github.com/Muxcore-Media/core/pkg/contracts v0.6.0 h1:NNaPjtDT81ESDDSMiEk2LGn6XsIFz+pKhXrr1TeSH+0=
 github.com/Muxcore-Media/core/pkg/contracts v0.6.0/go.mod h1:riu1DrsCAJ9AJf9uf8IG1W8nYzcQ+Y7HiT6okz7Lmck=
 github.com/Muxcore-Media/core/sdk/go/client v0.6.1 h1:P8UFaAWRUFQwqUFAAgsYuhvOo/Pl2OnelTTDSoBSKwc=
