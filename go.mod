@@ -10,7 +10,7 @@ require (
 	github.com/Muxcore-Media/core/sdk/go/module v0.6.7
 	github.com/Muxcore-Media/media-ffprobe v0.1.9
 	github.com/Muxcore-Media/media-rename v0.2.7
-	github.com/Muxcore-Media/media-tvshows v0.1.13
+	github.com/Muxcore-Media/media-tvshows v0.1.24
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/nwaples/rardecode/v2 v2.3.0
 	google.golang.org/grpc v1.84.0
