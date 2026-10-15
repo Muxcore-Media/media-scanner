@@ -19,7 +19,7 @@ require (
 )
 
 require (
-	github.com/Muxcore-Media/media-root-folders v0.1.7
+	github.com/Muxcore-Media/media-root-folders v0.1.12
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

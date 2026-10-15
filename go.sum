@@ -12,8 +12,8 @@ github.com/Muxcore-Media/media-ffprobe v0.1.9 h1:rRC717s/5NQlPChoxn0F7HrlBUOJNvl
 github.com/Muxcore-Media/media-ffprobe v0.1.9/go.mod h1:81VHTDDxU3CBX5b6k9R/N0vUhdDYcTKWNqHVTwA4erU=
 github.com/Muxcore-Media/media-rename v0.2.7 h1:0vkwpUBbH4srcMfdUyQcD5wMv4zWRPofr8ff8jFCAgk=
 github.com/Muxcore-Media/media-rename v0.2.7/go.mod h1:6JQy8rZjanfxcuIsZXNflRBEX4v66W7xa2t0FVHdjDM=
-github.com/Muxcore-Media/media-root-folders v0.1.7 h1:uctUT763cgaIOcbDHRbn/9hRh+HiF7bfqFCNx+3iiz8=
-github.com/Muxcore-Media/media-root-folders v0.1.7/go.mod h1:bBb7dI0T6O+FD7R/jrhOZZ5vbYrAtZAeD83ARuOygsg=
+github.com/Muxcore-Media/media-root-folders v0.1.12 h1:1/ajQK4+O7jrIo2W9ieTm/3PTtlTLEE2Z6OCHbgN874=
+github.com/Muxcore-Media/media-root-folders v0.1.12/go.mod h1:8Vnobc/LkPu/t3O3fEmyu15gqfy5S5DgITkeA5UiL34=
 github.com/Muxcore-Media/media-tvshows v0.1.24 h1:vPYZYFOqIQYDyidB5wGwIYM6Jh6kd1DaVfGDRWfqrV4=
 github.com/Muxcore-Media/media-tvshows v0.1.24/go.mod h1:5JgGvv49swGqegApGHQDiBoBGOkqIzpMKMOqdvYG7kA=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
