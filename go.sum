@@ -10,8 +10,8 @@ github.com/Muxcore-Media/core/sdk/go/module v0.6.7 h1:jRXG/Ue4zLQ6Y7ENIYRC2mozGg
 github.com/Muxcore-Media/core/sdk/go/module v0.6.7/go.mod h1:iag3wMYYkMqN3R8/sTDfTyhWoz3+gZmyUpNYCg3vYA0=
 github.com/Muxcore-Media/media-ffprobe v0.1.9 h1:rRC717s/5NQlPChoxn0F7HrlBUOJNvlc2Z//ta6hx04=
 github.com/Muxcore-Media/media-ffprobe v0.1.9/go.mod h1:81VHTDDxU3CBX5b6k9R/N0vUhdDYcTKWNqHVTwA4erU=
-github.com/Muxcore-Media/media-rename v0.2.7 h1:0vkwpUBbH4srcMfdUyQcD5wMv4zWRPofr8ff8jFCAgk=
-github.com/Muxcore-Media/media-rename v0.2.7/go.mod h1:6JQy8rZjanfxcuIsZXNflRBEX4v66W7xa2t0FVHdjDM=
+github.com/Muxcore-Media/media-rename v0.2.12 h1:GWwFmJHhDGjOEhM9DLsU20l1Byj/Gtjh7esFtXBVLng=
+github.com/Muxcore-Media/media-rename v0.2.12/go.mod h1:5b9q2dKd8+N0szeH2jk7Z2I/mf1yZH3XCydJK7NZKxg=
 github.com/Muxcore-Media/media-root-folders v0.1.12 h1:1/ajQK4+O7jrIo2W9ieTm/3PTtlTLEE2Z6OCHbgN874=
 github.com/Muxcore-Media/media-root-folders v0.1.12/go.mod h1:8Vnobc/LkPu/t3O3fEmyu15gqfy5S5DgITkeA5UiL34=
 github.com/Muxcore-Media/media-tvshows v0.1.24 h1:vPYZYFOqIQYDyidB5wGwIYM6Jh6kd1DaVfGDRWfqrV4=
