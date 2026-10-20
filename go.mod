@@ -12,7 +12,7 @@ require (
 	github.com/Muxcore-Media/media-rename v0.2.7
 	github.com/Muxcore-Media/media-tvshows v0.1.24
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/nwaples/rardecode/v2 v2.3.0
+	github.com/nwaples/rardecode/v2 v2.4.5
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.55.0
